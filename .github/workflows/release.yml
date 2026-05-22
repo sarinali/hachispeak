@@ -51,15 +51,22 @@ jobs:
       - name: Build
         run: npm run ${{ matrix.script }}
         env:
-          # Disable keychain identity auto-discovery on macOS (builds are unsigned
-          # until real signing secrets are wired up).
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          # macOS Developer ID signing + Apple notarization.
+          # All values come from repository secrets — see docs/build/releasing.md
+          # for how to set them up. On Linux/Windows runners these are simply
+          # unused by electron-builder.
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Windows Authenticode signing (optional — leave secrets unset to
+          # ship an unsigned EXE that triggers SmartScreen on first run).
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
           # Intentionally NOT setting GH_TOKEN here — electron-builder would
           # auto-trigger implicit GitHub publishing on tag push, conflicting
           # with the softprops/action-gh-release step in the release job.
-          # When you're ready to sign, re-introduce the CSC_LINK / APPLE_* /
-          # WIN_CSC_LINK block here and remove `"identity": null` from the
-          # mac section in electron-builder.json.
 
       - name: Upload desktop artifacts
         uses: actions/upload-artifact@v4

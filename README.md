@@ -29,6 +29,8 @@
 - [What it does](#what-it-does)
 - [Screenshots](#screenshots)
 - [Install](#install)
+  - [macOS: "cannot verify the developer" on first launch](#macos-macos-cannot-verify-the-developer-of-out-loud)
+  - [Windows: SmartScreen warning](#windows-smartscreen-warning)
 - [Supported languages](#supported-languages)
 - [How it works](#how-it-works)
 - [API](#api)
@@ -73,6 +75,18 @@ Grab the latest release for your platform from the [Releases page](https://githu
 - **Linux**: `Out Loud-<version>.AppImage`
 
 Or build it yourself. See [Build from source](#build-from-source).
+
+### macOS: "macOS cannot verify the developer of Out Loud"
+
+You'll see this dialog the first time you launch Out Loud — that's because the app is signed with our Apple Developer ID but not yet notarized by Apple. The app is safe; macOS just wants you to confirm.
+
+**Right-click** Out Loud in `/Applications` → choose **Open** → click **Open** in the dialog. macOS will remember and won't ask again.
+
+(If you see **"Out Loud.app is damaged and can't be opened"** instead, that usually means the download was corrupted or quarantine got applied unusually. Re-download, or as a last resort: `xattr -dr com.apple.quarantine "/Applications/Out Loud.app"`.)
+
+### Windows: SmartScreen warning
+
+Windows may show "Windows protected your PC" because the installer isn't signed with a paid Windows code-signing cert. Click **More info** → **Run anyway** to proceed.
 
 ## Supported languages
 
@@ -216,6 +230,7 @@ For automated releases via GitHub Actions, see [`docs/build/releasing.md`](./doc
 
 Deeper docs live in [`docs/`](./docs/README.md):
 
+- **Release notes**: [`CHANGELOG.md`](./CHANGELOG.md) — per-version fixes
 - **App**: [`docs/app/architecture.md`](./docs/app/architecture.md), [`docs/app/api.md`](./docs/app/api.md), [`docs/app/voices.md`](./docs/app/voices.md), [`docs/app/openapi.yaml`](./docs/app/openapi.yaml)
 - **Extensions**: [`docs/extensions/testing.md`](./docs/extensions/testing.md), [`chrome-extension/README.md`](./chrome-extension/README.md), [`safari-extension/README.md`](./safari-extension/README.md)
 - **Build**: [`docs/build/releasing.md`](./docs/build/releasing.md), [`docs/build/mac-app-store.md`](./docs/build/mac-app-store.md)

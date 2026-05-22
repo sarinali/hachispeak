@@ -101,19 +101,30 @@ Cross-platform caveats:
 
 ## Code signing
 
-Release builds are unsigned unless you set the corresponding GitHub secrets. Unsigned builds work but show Gatekeeper / SmartScreen warnings.
+Release builds are **Developer-ID signed on macOS** (using the cert pinned in `electron-builder.json` as `mac.identity`) and **unsigned on Windows**. Notarization on macOS is currently disabled (`mac.notarize: false`) — flip it back on once Apple's notary service is reliable again.
 
-### macOS
+### macOS first-launch UX
 
-Create an Apple Developer ID certificate, then set:
+| Build state | What users see on first launch |
+| ----------- | ------------------------------ |
+| Developer-ID signed, NOT notarized (current) | "macOS cannot verify the developer of Out Loud." Users right-click → Open once. |
+| Developer-ID signed AND notarized (goal) | App opens immediately, no dialog. |
+
+End-user instructions live in the [main README](../../README.md#macos-macos-cannot-verify-the-developer-of-out-loud).
+
+### macOS: enabling notarization
+
+When ready (and when Apple's notary service is healthy), flip `mac.notarize` to `true` in `electron-builder.json` and ensure these env vars / GitHub secrets are set:
 
 | Secret                        | Source                                                   |
 | ----------------------------- | -------------------------------------------------------- |
-| `CSC_LINK`                    | Base64-encoded `.p12` certificate                        |
+| `CSC_LINK`                    | Base64-encoded `.p12` certificate (for CI)               |
 | `CSC_KEY_PASSWORD`            | Password for the `.p12`                                  |
-| `APPLE_ID`                    | Your Apple ID email                                      |
+| `APPLE_ID`                    | Apple ID email                                           |
 | `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password from appleid.apple.com             |
-| `APPLE_TEAM_ID`               | Your Apple Developer Team ID                             |
+| `APPLE_TEAM_ID`               | Apple Developer Team ID                                  |
+
+For local builds on a Mac that has the cert in Keychain, you only need the three `APPLE_*` env vars (or `APPLE_KEYCHAIN_PROFILE` if you stored credentials via `xcrun notarytool store-credentials`).
 
 For Mac App Store (not Developer ID direct distribution), see [`mac-app-store.md`](./mac-app-store.md).
 
@@ -123,6 +134,8 @@ For Mac App Store (not Developer ID direct distribution), see [`mac-app-store.md
 | ----------------------- | --------------------------------------- |
 | `WIN_CSC_LINK`          | Base64-encoded `.pfx` certificate       |
 | `WIN_CSC_KEY_PASSWORD`  | Password for the `.pfx`                 |
+
+Without these, the Windows installer ships unsigned and SmartScreen prompts users to confirm on first run.
 
 ### Linux
 

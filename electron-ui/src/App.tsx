@@ -38,10 +38,18 @@ function App() {
 
   const controlsDisabled = player.isPlaying && !player.isPaused;
 
+  // The Electron main window is only frameless on macOS (titleBarStyle:
+  // "hiddenInset"). On Windows/Linux the OS draws a real title bar, so making
+  // the top strip a drag region would intercept clicks and "fight" the user.
+  const isMacFrameless = window.electronAPI?.platform === "darwin";
+  const topStripStyle = isMacFrameless
+    ? ({ WebkitAppRegion: "drag" } as React.CSSProperties)
+    : undefined;
+
   return (
     <div className="flex h-screen select-none flex-col overflow-hidden p-5 pt-0">
-      {/* Drag region for frameless window */}
-      <div className="h-8 w-full" style={{ WebkitAppRegion: "drag" } as React.CSSProperties} />
+      {/* Top strip: drag handle on macOS, plain spacer elsewhere */}
+      <div className="h-8 w-full" style={topStripStyle} />
 
       {/* Header */}
       <h1 className="mb-4 flex items-center gap-2.5 text-lg">
@@ -82,6 +90,19 @@ function App() {
           {/* Volume slider */}
           <VolumeSlider value={settings.volume} onChange={(v) => updateSetting("volume", v)} />
         </div>
+
+        {/* Error banner — visible when TTS fails so users can report it */}
+        {player.error && (
+          <div
+            role="alert"
+            className="mt-3 max-h-32 overflow-auto rounded-md border border-red-500/40 bg-red-950/40 p-3 text-xs text-red-200"
+          >
+            <div className="mb-1 font-semibold text-red-100">TTS error</div>
+            <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-snug">
+              {player.error}
+            </pre>
+          </div>
+        )}
 
         {/* Progress section */}
         <ProgressBar

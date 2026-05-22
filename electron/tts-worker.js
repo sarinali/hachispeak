@@ -1,6 +1,7 @@
 import { parentPort } from "worker_threads";
 import * as ort from "onnxruntime-node";
 import * as fs from "fs/promises";
+import { existsSync } from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import ffmpeg from "fluent-ffmpeg";
@@ -10,9 +11,36 @@ import ESpeakNg from "espeak-ng";
 import { createWavBuffer, modifyWavSpeed, wavToMp3 } from "./shared-audio.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+// Resolve a path that may live inside app.asar to its real on-disk location
+// under app.asar.unpacked. Always prefer the unpacked variant when it exists,
+// because Electron's asar interception lets fs.readFile see asar-internal
+// files, but child_process.spawn (used by fluent-ffmpeg) bypasses asar and
+// can only execute real files on disk. Returning the unpacked path works
+// transparently for both cases.
+function resolveUnpacked(p) {
+    if (!p)
+        return null;
+    if (p.includes("app.asar") && !p.includes("app.asar.unpacked")) {
+        const unpacked = p.replace("app.asar" + path.sep, "app.asar.unpacked" + path.sep);
+        if (existsSync(unpacked))
+            return unpacked;
+        // Fallback for path separator mismatches across platforms.
+        const unpackedAlt = p.replace("app.asar", "app.asar.unpacked");
+        if (existsSync(unpackedAlt))
+            return unpackedAlt;
+    }
+    if (existsSync(p))
+        return p;
+    return p;
+}
 // Set ffmpeg path for fluent-ffmpeg
-if (ffmpegPath) {
-    ffmpeg.setFfmpegPath(ffmpegPath);
+const resolvedFfmpegPath = resolveUnpacked(ffmpegPath);
+if (resolvedFfmpegPath) {
+    ffmpeg.setFfmpegPath(resolvedFfmpegPath);
+    console.log("[TTS Worker] ffmpeg path:", resolvedFfmpegPath);
+}
+else {
+    console.warn("[TTS Worker] ffmpeg-static binary not found; speed != 1 and mp3 export will fail");
 }
 const MODEL_CONTEXT_WINDOW = 512;
 const SAMPLE_RATE = 24000;
@@ -21,12 +49,9 @@ const LOOK_AHEAD_SIZES = {
     cpu: 4,
     coreml: 3,
 };
-// Models directory - embedded in the app
-// In packaged app, unpacked files are in app.asar.unpacked
+// Models directory - embedded in the app, asarUnpack'd by electron-builder.
+const MODELS_DIR = resolveUnpacked(path.join(__dirname, "models")) ?? path.join(__dirname, "models");
 const isPackaged = __dirname.includes("app.asar");
-const MODELS_DIR = isPackaged
-    ? path.join(__dirname.replace("app.asar", "app.asar.unpacked"), "models")
-    : path.join(__dirname, "models");
 console.log("[TTS Worker] __dirname:", __dirname);
 console.log("[TTS Worker] isPackaged:", isPackaged);
 console.log("[TTS Worker] MODELS_DIR:", MODELS_DIR);
@@ -628,11 +653,20 @@ parentPort?.on("message", async (message) => {
             });
         }
         catch (error) {
+            // Log full error to the worker's stderr so it surfaces in the Electron
+            // main-process console — crucial for diagnosing platform-specific bugs
+            // that only repro in packaged builds.
+            console.error("[TTS Worker] generate failed:", error);
             if (!isShuttingDown) {
+                const message = error?.message || String(error);
+                const stack = error?.stack || "";
                 parentPort?.postMessage({
                     requestId,
                     type: "error",
-                    error: error.message,
+                    error: message,
+                    stack,
+                    platform: process.platform,
+                    arch: process.arch,
                 });
             }
         }

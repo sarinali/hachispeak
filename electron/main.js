@@ -78,13 +78,17 @@ const isDev = process.env.NODE_ENV === "development";
 function createWindow() {
     const preloadPath = path.join(__dirname, "preload.cjs");
     console.log("[Main] Preload path:", preloadPath);
+    const isMac = process.platform === "darwin";
     mainWindow = new BrowserWindow({
         width: 480,
         height: 600,
         minWidth: 400,
         minHeight: 500,
         resizable: true,
-        titleBarStyle: "hiddenInset",
+        // Frameless-with-traffic-lights only makes sense on macOS. On Windows/Linux
+        // we keep the native frame so users get the expected min/max/close buttons
+        // and OS-native drag, instead of an invisible drag region fighting them.
+        ...(isMac ? { titleBarStyle: "hiddenInset" } : { frame: true }),
         webPreferences: {
             contextIsolation: true,
             nodeIntegration: false,
@@ -199,9 +203,15 @@ function createTTSWorker() {
             }
         }
         if (type === "error") {
+            const { stack, platform, arch } = message;
+            console.error("[Worker] TTS error:", error, stack ? `\n  stack: ${stack}` : "", platform ? `\n  platform: ${platform}/${arch}` : "");
             const pending = pendingRequests.get(requestId);
             if (pending) {
-                pending.reject(new Error(error));
+                const richError = new Error(error);
+                richError.stack = stack || richError.stack;
+                richError.workerPlatform = platform;
+                richError.workerArch = arch;
+                pending.reject(richError);
                 pendingRequests.delete(requestId);
             }
         }
@@ -509,7 +519,10 @@ ipcMain.handle("tts:stream:start", async (_event, params) => {
     }
     catch (error) {
         console.error("[TTS] Streaming error:", error);
-        mainWindow?.webContents.send("tts:error", error.message);
+        // Forward a richer payload so the renderer can show enough detail for
+        // users (especially on Windows) to file a meaningful bug report.
+        const payload = `${error.message}\n[${process.platform}/${process.arch}]${error.stack ? `\n${error.stack}` : ""}`;
+        mainWindow?.webContents.send("tts:error", payload);
         throw error;
     }
 });
@@ -560,45 +573,45 @@ app.whenReady().then(() => {
 app.on("window-all-closed", () => {
     // Don't quit - keep running in tray
 });
-app.on("before-quit", () => {
+// Track whether we've already finished the synchronous teardown so the
+// second pass through before-quit (after our app.quit() re-fire) doesn't
+// loop forever.
+let quitCleanupDone = false;
+app.on("before-quit", (event) => {
+    if (quitCleanupDone)
+        return;
+    // Defer the actual quit until we've torn down the worker. If we let
+    // Electron continue here, V8 starts freeing the Node environment and
+    // calls stop_sub_worker_contexts → pthread_join on the TTS worker. With
+    // the worker still alive (especially mid ONNX inference or mid graceful
+    // shutdown), the native ONNX destructor isn't reentrant-safe and the
+    // worker thread aborts → SIGABRT on macOS.
+    event.preventDefault();
     isAppQuitting = true;
-    // Stop tray animation
     stopTrayAnimation();
-    // Close HTTP server
     if (httpServer) {
         httpServer.close();
         httpServer = null;
     }
-    // Clear all pending requests to prevent callbacks during shutdown
     for (const [, pending] of pendingRequests) {
         pending.reject(new Error("App is shutting down"));
     }
     pendingRequests.clear();
-    // Terminate worker gracefully - wait for acknowledgment or timeout
+    const finishQuit = () => {
+        quitCleanupDone = true;
+        app.quit();
+    };
     if (ttsWorker) {
-        let cleanupDone = false;
-        // Listen for shutdown acknowledgment
-        const shutdownHandler = (message) => {
-            if (message.type === "shutdown_complete") {
-                cleanupDone = true;
-                console.log("[Main] Worker cleanup complete");
-                if (ttsWorker) {
-                    ttsWorker.terminate();
-                    ttsWorker = null;
-                }
-            }
-        };
-        ttsWorker.on("message", shutdownHandler);
-        ttsWorker.postMessage({ type: "shutdown" });
-        // Force terminate after timeout if worker doesn't respond.
-        // Give extra time for LLM native thread to finish its current token.
-        setTimeout(() => {
-            if (ttsWorker && !cleanupDone) {
-                console.log("[Main] Force terminating worker after timeout");
-                ttsWorker.terminate();
-                ttsWorker = null;
-            }
-        }, 3000);
+        const worker = ttsWorker;
+        ttsWorker = null;
+        // Hard terminate — don't wait for the worker to await its own ONNX
+        // session release. The OS reclaims everything on exit anyway, and a
+        // synchronous kill before V8 teardown is the only reliable way to
+        // avoid the JoinThread crash documented above.
+        worker.terminate().then(finishQuit, finishQuit);
+    }
+    else {
+        finishQuit();
     }
 });
 //# sourceMappingURL=main.js.map

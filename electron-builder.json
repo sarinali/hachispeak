@@ -12,15 +12,7 @@
     "electron/**/*.png",
     "electron/models/**/*",
     "electron-ui/dist/**/*",
-    "!node_modules/**/*",
-    "node_modules/onnxruntime-node/**/*",
-    "node_modules/espeak-ng/**/*",
-    "node_modules/wavefile/**/*",
-    "node_modules/fluent-ffmpeg/**/*",
-    "node_modules/ffmpeg-static/**/*",
-    "node_modules/isexe/**/*",
-    "node_modules/which/**/*",
-    "node_modules/async/**/*"
+    "package.json"
   ],
   "extraResources": [
     {
@@ -45,12 +37,13 @@
         "arch": ["arm64", "x64"]
       }
     ],
-    "identity": null,
+    "identity": "Julia Kafarska (8Y2UTZ2NBZ)",
     "icon": "build-resources/icon.icns",
     "hardenedRuntime": true,
     "gatekeeperAssess": false,
     "entitlements": "build-resources/entitlements.mac.plist",
-    "entitlementsInherit": "build-resources/entitlements.mac.plist"
+    "entitlementsInherit": "build-resources/entitlements.mac.plist",
+    "notarize": false
   },
   "dmg": {
     "background": "build-resources/dmg-background.png",
@@ -85,7 +78,8 @@
     "oneClick": false,
     "allowToChangeInstallationDirectory": true,
     "installerIcon": "build-resources/icon.ico",
-    "uninstallerIcon": "build-resources/icon.ico"
+    "uninstallerIcon": "build-resources/icon.ico",
+    "include": "build-resources/installer.nsh"
   },
   "linux": {
     "target": [

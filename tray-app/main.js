@@ -34,13 +34,23 @@ async function startServer() {
 
   console.log("Starting Out Loud server...");
 
+  // On macOS, GUI-launched processes don't inherit the user's shell PATH,
+  // so node/npm installed via Homebrew aren't found unless we prepend the
+  // common install locations. On Windows the npm shim lives under
+  // %APPDATA%\npm or Program Files and is already on PATH; prefixing Unix
+  // paths there would only corrupt PATH.
+  const isMac = process.platform === "darwin";
+  const isArm = process.arch === "arm64";
+  const macPathPrefix = isArm ? "/opt/homebrew/bin:/usr/local/bin" : "/usr/local/bin";
+  const augmentedPath = isMac ? `${macPathPrefix}:${process.env.PATH || ""}` : process.env.PATH;
+
   serverProcess = spawn("npm", ["run", "dev"], {
     cwd: OUT_LOUD_PATH,
     shell: true,
     stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
-      PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}`,
+      PATH: augmentedPath,
     },
   });
 

@@ -20,6 +20,7 @@ interface AudioPlayerState {
   playProgress: number;
   stats: string;
   info: string;
+  error: string | null;
   currentChunkIndex: number;
   totalChunks: number;
   canDownload: boolean;
@@ -33,6 +34,7 @@ export function useAudioPlayer(getVolume: () => number) {
     playProgress: 0,
     stats: "-",
     info: "Ready",
+    error: null,
     currentChunkIndex: -1,
     totalChunks: 0,
     canDownload: false,
@@ -212,7 +214,11 @@ export function useAudioPlayer(getVolume: () => number) {
 
       // Check if electronAPI is available
       if (!window.electronAPI) {
-        setState((s) => ({ ...s, info: "ERROR: Not running in Electron" }));
+        setState((s) => ({
+          ...s,
+          info: "ERROR: Not running in Electron",
+          error: "Not running in Electron",
+        }));
         return;
       }
 
@@ -267,6 +273,7 @@ export function useAudioPlayer(getVolume: () => number) {
         playProgress: 0,
         stats: "-",
         info: "Starting...",
+        error: null,
         canDownload: false,
       }));
       window.electronAPI.setPlaying(true);
@@ -421,6 +428,7 @@ export function useAudioPlayer(getVolume: () => number) {
             setState((s) => ({
               ...s,
               info: "ERROR: No audio chunks received",
+              error: "No audio chunks received. The TTS worker finished without producing audio.",
               isPlaying: false,
             }));
             stopAudio();
@@ -438,6 +446,7 @@ export function useAudioPlayer(getVolume: () => number) {
           setState((s) => ({
             ...s,
             info: `ERROR: ${error}`,
+            error,
             isPlaying: false,
           }));
           stopAudio();
@@ -456,6 +465,7 @@ export function useAudioPlayer(getVolume: () => number) {
         setState((s) => ({
           ...s,
           info: `ERROR: ${message}`,
+          error: message,
           isPlaying: false,
         }));
         stopAudio();

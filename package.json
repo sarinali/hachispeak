@@ -1,6 +1,6 @@
 {
   "name": "out-loud",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Free, open-source, 100% offline AI text-to-speech desktop app powered by Kokoro-82M.",
   "author": {
     "name": "Light Cloud Labs",
@@ -51,7 +51,7 @@
     "electron:build:mac": "npm run electron-ui:build && npm run electron:compile && electron-builder --mac --publish never -c.directories.output=releases/macos",
     "electron:build:mas": "npm run electron-ui:build && npm run electron:compile && electron-builder --mac mas --publish never -c.directories.output=releases/macos",
     "electron:build:mas-dev": "npm run electron-ui:build && npm run electron:compile && electron-builder --mac mas-dev --publish never -c.directories.output=releases/macos",
-    "electron:build:win": "npm run electron-ui:build && npm run electron:compile && electron-builder --win --publish never -c.directories.output=releases/windows",
+    "electron:build:win": "node scripts/download-vc-redist.mjs && npm run electron-ui:build && npm run electron:compile && electron-builder --win --publish never -c.directories.output=releases/windows",
     "electron:build:linux": "npm run electron-ui:build && npm run electron:compile && electron-builder --linux --publish never -c.directories.output=releases/linux",
     "extension:chrome:pack": "mkdir -p releases/extensions && cd chrome-extension && zip -r ../releases/extensions/out-loud-chrome.zip . -x '*.DS_Store'",
     "extension:safari:convert": "mkdir -p releases/extensions && xcrun safari-web-extension-converter chrome-extension --project-location releases/extensions/safari --app-name 'Out Loud Extension' --bundle-identifier com.lightcloudlabs.outloud.extension --no-prompt",

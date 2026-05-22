@@ -1,4 +1,5 @@
 import * as fs from "fs/promises";
+import { existsSync } from "fs";
 import * as path from "path";
 import * as os from "os";
 import ffmpeg from "fluent-ffmpeg";
@@ -7,8 +8,25 @@ import ffmpegPath from "ffmpeg-static";
 import wavefile from "wavefile";
 const { WaveFile } = wavefile;
 
-if (ffmpegPath) {
-  ffmpeg.setFfmpegPath(ffmpegPath);
+// ffmpeg-static returns a path inside app.asar in packaged builds; the binary
+// itself is asarUnpack'd. fluent-ffmpeg spawns the binary via child_process,
+// which bypasses Electron's asar layer, so we must resolve to the real
+// app.asar.unpacked path or the spawn will fail with ENOENT.
+function resolveFfmpegBinary(p: string | null | undefined): string | null {
+  if (!p) return null;
+  if (p.includes("app.asar") && !p.includes("app.asar.unpacked")) {
+    const unpacked = p.replace("app.asar" + path.sep, "app.asar.unpacked" + path.sep);
+    if (existsSync(unpacked)) return unpacked;
+    const unpackedAlt = p.replace("app.asar", "app.asar.unpacked");
+    if (existsSync(unpackedAlt)) return unpackedAlt;
+  }
+  if (existsSync(p)) return p;
+  return p;
+}
+
+const resolvedFfmpegPath = resolveFfmpegBinary(ffmpegPath);
+if (resolvedFfmpegPath) {
+  ffmpeg.setFfmpegPath(resolvedFfmpegPath);
 }
 
 export function createWavBuffer(waveform: Float32Array, sampleRate: number): ArrayBuffer {
