@@ -29,7 +29,7 @@
 - [What it does](#what-it-does)
 - [Screenshots](#screenshots)
 - [Install](#install)
-  - [macOS: "cannot verify the developer" on first launch](#macos-macos-cannot-verify-the-developer-of-out-loud)
+  - [macOS first launch](#macos-first-launch)
   - [Windows: SmartScreen warning](#windows-smartscreen-warning)
 - [Supported languages](#supported-languages)
 - [How it works](#how-it-works)
@@ -76,13 +76,18 @@ Grab the latest release for your platform from the [Releases page](https://githu
 
 Or build it yourself. See [Build from source](#build-from-source).
 
-### macOS: "macOS cannot verify the developer of Out Loud"
+### macOS first launch
 
-You'll see this dialog the first time you launch Out Loud — that's because the app is signed with our Apple Developer ID but not yet notarized by Apple. The app is safe; macOS just wants you to confirm.
+**1.0.3 and newer**: the app is Developer-ID signed and Apple-notarized. Double-click — it opens. No dialog.
 
-**Right-click** Out Loud in `/Applications` → choose **Open** → click **Open** in the dialog. macOS will remember and won't ask again.
+**1.0.2 only**: that one release shipped signed but un-notarized (Apple's notary service was stuck during the release window). On first launch you'll see _"macOS cannot verify the developer of Out Loud"_. Upgrade to 1.0.3+ to skip this entirely, or work around it once:
 
-(If you see **"Out Loud.app is damaged and can't be opened"** instead, that usually means the download was corrupted or quarantine got applied unusually. Re-download, or as a last resort: `xattr -dr com.apple.quarantine "/Applications/Out Loud.app"`.)
+- **macOS 15 (Sequoia)+**: click **Done** → open **System Settings → Privacy & Security** → scroll to the Security section → click **Open Anyway** next to the "Out Loud was blocked" line → authenticate.
+- **macOS 14 (Sonoma) and older**: **right-click** Out Loud in `/Applications` → **Open** → click **Open** in the dialog.
+
+Either way macOS remembers your decision — future launches are direct.
+
+(If you see **"Out Loud.app is damaged and can't be opened"** instead, the download likely got corrupted — re-download. Last-resort workaround: `xattr -dr com.apple.quarantine "/Applications/Out Loud.app"`.)
 
 ### Windows: SmartScreen warning
 

@@ -107,10 +107,17 @@ Release builds are **Developer-ID signed on macOS** (using the cert pinned in `e
 
 | Build state | What users see on first launch |
 | ----------- | ------------------------------ |
-| Developer-ID signed, NOT notarized (current) | "macOS cannot verify the developer of Out Loud." Users right-click → Open once. |
-| Developer-ID signed AND notarized (goal) | App opens immediately, no dialog. |
+| Developer-ID signed AND notarized (1.0.3+) | App opens immediately, no dialog. |
+| Developer-ID signed, NOT notarized (1.0.2 only) | "macOS cannot verify the developer of Out Loud." Workaround is OS-version-dependent. |
 
-End-user instructions live in the [main README](../../README.md#macos-macos-cannot-verify-the-developer-of-out-loud).
+1.0.2 shipped signed-but-not-notarized because Apple's notary service was stuck for 24+ hours during the release window. Their queue cleared later the same day; 1.0.3 flipped `mac.notarize` back to `true` and notarization succeeded.
+
+If Apple's notary service stalls again in the future:
+- Flip `mac.notarize: false` in `electron-builder.json` to ship signed-only.
+- Document the per-OS workaround for that release.
+- Flip back to `true` once Apple's queue is healthy and cut a patch.
+
+End-user workaround instructions (right-click → Open on macOS 14, Privacy & Security → Open Anyway on macOS 15+) live in the [main README](../../README.md#macos-first-launch).
 
 ### macOS: enabling notarization
 

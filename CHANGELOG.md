@@ -3,6 +3,16 @@
 All notable user-facing changes to Out Loud. See `git log` for the full
 history.
 
+## 1.0.3 — 2026-05-23
+
+### macOS
+
+- **Notarization re-enabled.** Apple's notary service was unhealthy during
+  the 1.0.2 release window, so 1.0.2 shipped signed-but-not-notarized and
+  triggered the "macOS cannot verify the developer" dialog on first launch.
+  Apple's queue cleared later the same day; 1.0.3 is fully Developer-ID
+  signed AND notarized. First launch now opens immediately with no prompt.
+
 ## 1.0.2 — 2026-05-23
 
 ### Cross-platform packaging fixes
@@ -27,8 +37,15 @@ history.
   verify the developer" dialog — right-click → **Open** once and macOS
   remembers. No more Terminal commands needed.
 - _Notarization is temporarily disabled while Apple's notary service works
-  through a backlog. We'll re-enable it in 1.0.3 — at that point first
-  launch will open with no prompt at all._
+  through a backlog. Two submissions sat at status `In Progress` for 24+
+  hours during the release window with no movement, so we shipped 1.0.2
+  signed-but-not-notarized rather than block the release. We'll re-enable
+  in 1.0.3 (just flip `mac.notarize` back to `true` in
+  `electron-builder.json` and rebuild) once Apple's queue is healthy. At
+  that point first launch will open with no prompt at all. For now, users
+  on macOS 15+ have to go through System Settings → Privacy & Security →
+  Open Anyway on first launch; older macOS still allows the right-click →
+  Open shortcut. See the [README install notes](./README.md#macos-macos-cannot-verify-the-developer-of-out-loud)._
 - **Quit crash**: fixed `SIGABRT` on quit caused by V8 tearing down the
   Node environment before the TTS worker finished releasing its ONNX
   session. The main process now hard-terminates the worker before quit so
