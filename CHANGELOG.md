@@ -3,6 +3,22 @@
 All notable user-facing changes to Out Loud. See `git log` for the full
 history.
 
+## 1.0.5 — 2026-05-24
+
+### UI
+
+- **Fix dropped characters in the text input.** The main process echoed
+  every `settings:update` IPC back to the same renderer that sent it. The
+  echo arrived after React had already applied later keystrokes, so the
+  incoming broadcast overwrote the unsynced characters and the textarea
+  appeared to "remove the most recent letters" while typing. Fixed by
+  suppressing the broadcast on IPC-originated updates — HTTP-originated
+  updates (Chrome extension) still notify the renderer as before.
+- **"Load example" button.** Users who cleared the textarea in 1.0.4 had
+  no way to get the demo text back without clearing localStorage. There's
+  now a small "Load example" link in the bottom-right of the textarea
+  whenever it's empty.
+
 ## 1.0.4 — 2026-05-23
 
 ### UI

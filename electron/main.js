@@ -293,10 +293,17 @@ let sharedSettings = {
 function getSharedSettings() {
     return { ...sharedSettings };
 }
-function updateSharedSettings(updates) {
+function updateSharedSettings(updates, options = {}) {
     sharedSettings = { ...sharedSettings, ...updates };
-    // Notify the renderer about settings change
-    mainWindow?.webContents.send("settings:updated", sharedSettings);
+    // Broadcast to the renderer ONLY when the change came from outside the
+    // renderer (e.g. the Chrome extension via the HTTP API). Broadcasting
+    // back to the same renderer that initiated an IPC update races with
+    // subsequent keystrokes: the echo arrives after React has already
+    // applied newer state, so setSettings(broadcast) overwrites unsynced
+    // characters and the textarea looks like it's dropping letters.
+    if (options.broadcast !== false) {
+        mainWindow?.webContents.send("settings:updated", sharedSettings);
+    }
     return sharedSettings;
 }
 // ============ HTTP Server for Extensions ============
@@ -484,9 +491,11 @@ ipcMain.handle("tts:voices", async () => {
 ipcMain.handle("settings:get", async () => {
     return getSharedSettings();
 });
-// Update shared settings
+// Update shared settings from the renderer. We deliberately suppress the
+// settings:updated broadcast here — the renderer already has the new state
+// (it called us with it) and a broadcast would race with later keystrokes.
 ipcMain.handle("settings:update", async (_event, updates) => {
-    return updateSharedSettings(updates);
+    return updateSharedSettings(updates, { broadcast: false });
 });
 // Start streaming TTS generation
 ipcMain.handle("tts:stream:start", async (_event, params) => {

@@ -7,6 +7,7 @@ import { ProgressBar } from "./components/ProgressBar";
 import { SettingsCheckbox } from "./components/SettingsCheckbox";
 import { useAudioPlayer } from "./hooks/useAudioPlayer";
 import { useSettings } from "./hooks/useSettings";
+import { DEFAULT_TEXT } from "./constants";
 
 function App() {
   const { settings, updateSetting } = useSettings();
@@ -14,6 +15,8 @@ function App() {
   // first launch (see useSettings); after that, the empty string is a legit
   // value the user chose. Falling back to DEFAULT_TEXT here would make the
   // textarea impossible to clear and look like the value "flickers" back.
+  // The "Load example" button in TextInput re-injects DEFAULT_TEXT on demand
+  // for users who cleared the field and want the demo back.
   const text = settings.text;
   const setText = (newText: string) => updateSetting("text", newText);
 
@@ -73,6 +76,7 @@ function App() {
               currentChunkIndex={player.currentChunkIndex}
               totalChunks={player.totalChunks}
               isPlaying={player.isPlaying}
+              exampleText={DEFAULT_TEXT}
             />
             <VoiceSelect
               language={settings.language}
