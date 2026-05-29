@@ -9,6 +9,7 @@ const ui = {
   volumeSlider: null,
   volumeValue: null,
   highlightCheckbox: null,
+  readModeCheckbox: null,
   overlay: null,
 
   getText() {
@@ -43,6 +44,7 @@ async function init() {
   ui.volumeSlider = document.getElementById("volume-slider");
   ui.volumeValue = document.getElementById("volume-value");
   ui.highlightCheckbox = document.getElementById("highlight-checkbox");
+  ui.readModeCheckbox = document.getElementById("read-mode-checkbox");
   ui.overlay = document.getElementById("text-highlight-overlay");
 
   const retryBtn = document.getElementById("retry-btn");
@@ -110,12 +112,41 @@ function bindEvents() {
     isPlaying ? ui.updateHighlight() : ui.clearHighlight();
   });
 
+  ui.readModeCheckbox?.addEventListener("change", () => {
+    setReadMode(ui.readModeCheckbox.checked);
+  });
+
   ui.playBtn.addEventListener("click", () => togglePlayback(ui));
   ui.downloadBtn?.addEventListener("click", download);
 }
 
+async function setReadMode(enabled) {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) return;
+
+  const msg = { type: "SET_READ_MODE", enabled };
+  try {
+    await chrome.tabs.sendMessage(tab.id, msg);
+  } catch (e) {
+    // Content script missing or stale (e.g. tab opened before the extension was
+    // reloaded). Inject the current content.js, then retry once.
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
+      await chrome.tabs.sendMessage(tab.id, msg);
+    } catch (e2) {
+      // Can't run on this page (chrome://, web store, PDF viewer, etc.) — revert.
+      if (ui.readModeCheckbox) ui.readModeCheckbox.checked = false;
+      console.warn("Out Loud: click-to-read unavailable on this page", e2);
+    }
+  }
+}
+
 function listenForMessages() {
   chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.type === "READ_MODE_CHANGED") {
+      if (ui.readModeCheckbox) ui.readModeCheckbox.checked = !!msg.enabled;
+      return;
+    }
     if (msg.type === "TEXT_SELECTED" || msg.type === "PLAY_TEXT") {
       const text = msg.text.trim();
       if (text && text !== ui.getText()) {
