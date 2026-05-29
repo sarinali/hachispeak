@@ -1,4 +1,4 @@
-import { parentPort } from "worker_threads";
+import { parentPort, workerData } from "worker_threads";
 import * as ort from "onnxruntime-node";
 import * as fs from "fs/promises";
 import { existsSync } from "fs";
@@ -46,9 +46,11 @@ const MODEL_CONTEXT_WINDOW = 512;
 const SAMPLE_RATE = 24000;
 
 // Look-ahead sizes per acceleration mode for streaming processing
+// Lower look-ahead = fewer chunks pre-committed to inference before the epoch
+// check runs between chunks, so a cancelled job bails after ~1 chunk of waste.
 const LOOK_AHEAD_SIZES: Record<string, number> = {
-  cpu: 4,
-  coreml: 3,
+  cpu: 2,
+  coreml: 2,
 };
 
 // Models directory - embedded in the app, asarUnpack'd by electron-builder.
@@ -72,6 +74,17 @@ let currentRequestId: string | null = null;
 // don't keep the worker busy.
 const cancelledRequests = new Set<string>();
 let activeJobs = 0;
+
+// Shared epoch from the main process. When it no longer equals a job's epoch,
+// that job has been superseded (newer request) or its client disconnected, and
+// it should bail at the next chunk boundary. Read synchronously so it works even
+// while ONNX inference is blocking the worker thread (a postMessage can't land).
+const epochView: Int32Array | null = workerData?.epochBuffer
+  ? new Int32Array(workerData.epochBuffer)
+  : null;
+function epochStale(myEpoch: number): boolean {
+  return epochView != null && myEpoch !== 0 && Atomics.load(epochView, 0) !== myEpoch;
+}
 
 // Shutdown flag to abort ongoing work
 let isShuttingDown = false;
@@ -521,6 +534,9 @@ async function generateVoice(
     throw new Error("Speed must be between 0.1 and 5");
   }
 
+  const myEpoch = (params as { epoch?: number }).epoch ?? 0;
+  const isCancelled = () => epochStale(myEpoch) || cancelledRequests.has(requestId);
+
   const tokensPerChunk = MODEL_CONTEXT_WINDOW - 2;
   const chunks = await preprocessText(params.text, params.lang, tokensPerChunk);
 
@@ -595,6 +611,11 @@ async function generateVoice(
   const processChunk = async (chunkIdx: number) => {
     const prepared = preparedChunks[chunkIdx];
 
+    // Bail before spending inference on a superseded/cancelled job.
+    if (isCancelled()) {
+      return { index: chunkIdx, waveform: new Float32Array(0) };
+    }
+
     if (prepared.type === "silence") {
       return { index: chunkIdx, waveform: new Float32Array(prepared.silenceLength!) };
     }
@@ -618,7 +639,7 @@ async function generateVoice(
 
   // Yield consecutive completed chunks in order
   const yieldReadyChunks = () => {
-    if (cancelledRequests.has(requestId)) return;
+    if (isCancelled()) return;
     while (nextToYield < totalChunks && completed[nextToYield]) {
       // Send chunk ready via IPC for streaming playback
       const waveform = results[nextToYield];
@@ -643,7 +664,7 @@ async function generateVoice(
   // Fill look-ahead window
   const fillLookAhead = () => {
     // Stop scheduling new inference work once the client has gone away.
-    if (cancelledRequests.has(requestId)) return;
+    if (isCancelled()) return;
     while (inFlight.size < lookAhead && nextToStart < totalChunks) {
       const chunkIdx = nextToStart;
       nextToStart++;
@@ -687,8 +708,8 @@ async function generateVoice(
     if (isShuttingDown) {
       throw new Error("Aborted due to shutdown");
     }
-    // Client disconnected — stop waiting on remaining inference.
-    if (cancelledRequests.has(requestId)) {
+    // Superseded or client disconnected — stop waiting on remaining inference.
+    if (isCancelled()) {
       break;
     }
     if (inFlight.size > 0) {
@@ -699,7 +720,7 @@ async function generateVoice(
   }
 
   // If cancelled, bail before the (potentially large) concatenation + encoding.
-  if (cancelledRequests.has(requestId)) {
+  if (isCancelled()) {
     return {
       buffer: createWavBuffer(new Float32Array(0), SAMPLE_RATE),
       mimeType: params.format === "mp3" ? "audio/mpeg" : "audio/wav",
@@ -798,9 +819,13 @@ parentPort?.on("message", async (message) => {
     try {
       const result = await generateVoice(data, requestId);
 
-      // Check if we were interrupted (shutdown or client disconnect).
-      if (isShuttingDown || cancelledRequests.has(requestId)) {
+      // Check if we were interrupted (shutdown, supersede, or client disconnect).
+      const reqEpoch = (data && data.epoch) || 0;
+      if (isShuttingDown || cancelledRequests.has(requestId) || epochStale(reqEpoch)) {
         console.log(`[Worker] generate cancelled (${requestId.slice(0, 8)})`);
+        // Tell main we actually stopped, so it can release the job slot and
+        // resolve the pending request. Without this, workerBusy would hang.
+        parentPort?.postMessage({ requestId, type: "cancelled" });
         return;
       }
 
