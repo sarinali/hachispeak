@@ -67,6 +67,12 @@ let cachedModelId: string | null = null;
 // Current request ID for progress messages
 let currentRequestId: string | null = null;
 
+// Requests cancelled by the main process (client disconnected mid-stream). The
+// generate loop checks this and stops scheduling new chunks, so abandoned clicks
+// don't keep the worker busy.
+const cancelledRequests = new Set<string>();
+let activeJobs = 0;
+
 // Shutdown flag to abort ongoing work
 let isShuttingDown = false;
 
@@ -499,15 +505,18 @@ function trimWaveform(waveform: Float32Array): Float32Array {
 
 // createWavBuffer, buildAtempoChain, modifyWavSpeed, wavToMp3 are imported from shared-audio.ts
 
-async function generateVoice(params: {
-  text: string;
-  lang: string;
-  voiceFormula: string;
-  model: string;
-  speed: number;
-  format: "wav" | "mp3";
-  acceleration: "cpu" | "coreml";
-}): Promise<{ buffer: ArrayBuffer; mimeType: string }> {
+async function generateVoice(
+  params: {
+    text: string;
+    lang: string;
+    voiceFormula: string;
+    model: string;
+    speed: number;
+    format: "wav" | "mp3";
+    acceleration: "cpu" | "coreml";
+  },
+  requestId: string
+): Promise<{ buffer: ArrayBuffer; mimeType: string }> {
   if (params.speed < 0.1 || params.speed > 5) {
     throw new Error("Speed must be between 0.1 and 5");
   }
@@ -609,6 +618,7 @@ async function generateVoice(params: {
 
   // Yield consecutive completed chunks in order
   const yieldReadyChunks = () => {
+    if (cancelledRequests.has(requestId)) return;
     while (nextToYield < totalChunks && completed[nextToYield]) {
       // Send chunk ready via IPC for streaming playback
       const waveform = results[nextToYield];
@@ -616,7 +626,7 @@ async function generateVoice(params: {
       const base64 = Buffer.from(wavBuffer).toString("base64");
 
       parentPort?.postMessage({
-        requestId: currentRequestId,
+        requestId,
         type: "chunk",
         data: {
           chunkIndex: nextToYield,
@@ -632,6 +642,8 @@ async function generateVoice(params: {
 
   // Fill look-ahead window
   const fillLookAhead = () => {
+    // Stop scheduling new inference work once the client has gone away.
+    if (cancelledRequests.has(requestId)) return;
     while (inFlight.size < lookAhead && nextToStart < totalChunks) {
       const chunkIdx = nextToStart;
       nextToStart++;
@@ -647,7 +659,7 @@ async function generateVoice(params: {
 
         // Report progress
         parentPort?.postMessage({
-          requestId: currentRequestId,
+          requestId,
           type: "progress",
           data: {
             stage: "inference",
@@ -675,11 +687,23 @@ async function generateVoice(params: {
     if (isShuttingDown) {
       throw new Error("Aborted due to shutdown");
     }
+    // Client disconnected — stop waiting on remaining inference.
+    if (cancelledRequests.has(requestId)) {
+      break;
+    }
     if (inFlight.size > 0) {
       await Promise.race(inFlight.values());
     } else {
       break;
     }
+  }
+
+  // If cancelled, bail before the (potentially large) concatenation + encoding.
+  if (cancelledRequests.has(requestId)) {
+    return {
+      buffer: createWavBuffer(new Float32Array(0), SAMPLE_RATE),
+      mimeType: params.format === "mp3" ? "audio/mpeg" : "audio/wav",
+    };
   }
 
   // Final yield
@@ -747,6 +771,14 @@ parentPort?.on("message", async (message) => {
     return;
   }
 
+  if (type === "cancel") {
+    if (requestId) {
+      cancelledRequests.add(requestId);
+      console.log(`[Worker] cancel (${requestId.slice(0, 8)})`);
+    }
+    return;
+  }
+
   if (type === "generate") {
     if (isShuttingDown) {
       parentPort?.postMessage({
@@ -759,12 +791,16 @@ parentPort?.on("message", async (message) => {
 
     // Store requestId for progress messages
     currentRequestId = requestId;
+    activeJobs++;
+    const startedAt = Date.now();
+    console.log(`[Worker] generate start (${requestId.slice(0, 8)}) active=${activeJobs}`);
 
     try {
-      const result = await generateVoice(data);
+      const result = await generateVoice(data, requestId);
 
-      // Check if we were interrupted
-      if (isShuttingDown) {
+      // Check if we were interrupted (shutdown or client disconnect).
+      if (isShuttingDown || cancelledRequests.has(requestId)) {
+        console.log(`[Worker] generate cancelled (${requestId.slice(0, 8)})`);
         return;
       }
 
@@ -780,6 +816,9 @@ parentPort?.on("message", async (message) => {
           mimeType: result.mimeType,
         },
       });
+      console.log(
+        `[Worker] generate done (${requestId.slice(0, 8)}) in ${Date.now() - startedAt}ms`
+      );
     } catch (error: any) {
       // Log full error to the worker's stderr so it surfaces in the Electron
       // main-process console — crucial for diagnosing platform-specific bugs
@@ -799,6 +838,8 @@ parentPort?.on("message", async (message) => {
       }
     } finally {
       currentRequestId = null;
+      cancelledRequests.delete(requestId);
+      activeJobs = Math.max(0, activeJobs - 1);
     }
   }
 });
