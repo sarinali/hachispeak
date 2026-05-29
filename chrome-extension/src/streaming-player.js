@@ -8,6 +8,10 @@ function concatArrays(a, b) {
   return result;
 }
 
+// Counts AudioContexts created across the panel's lifetime. Should stay at 1
+// (one reused context) — if it climbs with each click, that's a leak.
+let __olAudioContextCount = 0;
+
 class StreamingAudioPlayer {
   constructor() {
     this.audioContext = null;
@@ -286,6 +290,9 @@ class StreamingAudioPlayer {
   }
 
   stop() {
+    if (typeof olog === "function") {
+      olog(`stop: abort fetch, stop ${this.scheduledSources.length} sources`);
+    }
     if (this.abortController) {
       this.abortController.abort();
     }
@@ -302,6 +309,9 @@ class StreamingAudioPlayer {
       this.audioContext = new AudioContext();
       this.gainNode = this.audioContext.createGain();
       this.gainNode.connect(this.audioContext.destination);
+      __olAudioContextCount++;
+      if (typeof olog === "function")
+        olog(`new AudioContext (total created=${__olAudioContextCount})`);
     }
     this.gainNode.gain.value = this.volume;
     this.chunkTimings = [];

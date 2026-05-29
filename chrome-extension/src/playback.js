@@ -16,6 +16,7 @@ let isPlaying = false;
 let isPaused = false;
 let playGeneration = 0; // bumps on every new utterance / stop; guards stale callbacks
 let currentText = ""; // text of the current utterance (for resume-from-position)
+let playStartedAt = 0; // performance.now() when the current play() kicked off (for latency logging)
 let cachedAudio = { text: "", voice: "", chunks: [] };
 
 function getPlayer() {
@@ -26,7 +27,11 @@ function getPlayer() {
 function createPlayerCallbacks(ui, gen) {
   return {
     onStart: () => {
-      if (gen !== playGeneration) return;
+      if (gen !== playGeneration) {
+        olog(`drop stale onStart #${gen} (current #${playGeneration})`);
+        return;
+      }
+      olog(`first audio #${gen} in ${Math.round(performance.now() - playStartedAt)}ms`);
       isPlaying = true;
       isPaused = false;
       ui.updateUI();
@@ -39,7 +44,11 @@ function createPlayerCallbacks(ui, gen) {
       ui.updateHighlight();
     },
     onEnd: () => {
-      if (gen !== playGeneration) return;
+      if (gen !== playGeneration) {
+        olog(`drop stale onEnd #${gen} (current #${playGeneration})`);
+        return;
+      }
+      olog(`end #${gen} after ${Math.round(performance.now() - playStartedAt)}ms`);
       isPlaying = false;
       isPaused = false;
       ui.clearHighlight();
@@ -48,6 +57,7 @@ function createPlayerCallbacks(ui, gen) {
     },
     onError: () => {
       if (gen !== playGeneration) return;
+      olog(`error #${gen}`);
       isPlaying = false;
       isPaused = false;
       ui.clearHighlight();
@@ -61,6 +71,7 @@ function createPlayerCallbacks(ui, gen) {
 // Synchronous (player.stop() is sync) and keeps the AudioContext for reuse.
 // Does NOT bump the generation or touch UI — callers decide that.
 function abortCurrent() {
+  if (isPlaying || isPaused) olog(`abort (was playing=${isPlaying}, paused=${isPaused})`);
   player?.stop();
   if (audio) {
     audio.pause();
@@ -76,10 +87,12 @@ async function play(ui, textArg) {
   const text = (textArg ?? ui.getText()).trim();
 
   const gen = ++playGeneration; // (1) claim a new generation; older ones now inert
+  olog(`play #${gen} len=${text.length}`);
   abortCurrent(); // (2) kill the previous fetch + sound before scheduling new audio
   if (gen !== playGeneration) return; // (3) superseded already → bail
   if (!text) return;
 
+  playStartedAt = performance.now();
   currentText = text;
   ui.textEl.value = text;
   ui.playBtn.disabled = false;

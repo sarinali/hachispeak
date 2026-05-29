@@ -1,5 +1,13 @@
 // Shared constants
 
+// Lightweight debug logging. Toggle off to silence. Logs to the side panel's
+// console (chrome://extensions -> Out Loud -> "Inspect views: sidepanel.html").
+const OUTLOUD_DEBUG = true;
+function olog(...args) {
+  if (OUTLOUD_DEBUG)
+    console.log("[OutLoud]", `+${(performance.now() / 1000).toFixed(2)}s`, ...args);
+}
+
 const SERVER_URL = "http://localhost:51730";
 const DEFAULT_LANGUAGE = "en-us";
 const DEFAULT_VOICE = "af_heart";

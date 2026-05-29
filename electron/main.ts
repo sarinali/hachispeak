@@ -276,7 +276,11 @@ async function preloadModel() {
   }
 }
 
-function generateTTS(params: any, onChunk?: (data: any) => void): Promise<any> {
+function generateTTS(
+  params: any,
+  onChunk?: (data: any) => void,
+  onRequestId?: (id: string) => void
+): Promise<any> {
   return new Promise((resolve, reject) => {
     if (!ttsWorker) {
       reject(new Error("TTS Worker not initialized"));
@@ -285,6 +289,11 @@ function generateTTS(params: any, onChunk?: (data: any) => void): Promise<any> {
 
     const requestId = crypto.randomUUID();
     pendingRequests.set(requestId, { resolve, reject, onChunk });
+    if (onRequestId) onRequestId(requestId);
+
+    console.log(
+      `[HTTP] generate ${requestId.slice(0, 8)} queued (in-flight=${pendingRequests.size})`
+    );
 
     ttsWorker.postMessage({
       type: "generate",
@@ -292,6 +301,17 @@ function generateTTS(params: any, onChunk?: (data: any) => void): Promise<any> {
       data: params,
     });
   });
+}
+
+// Cancel an in-flight request (client disconnected). Tells the worker to stop
+// scheduling chunks and settles the pending promise so the HTTP handler unwinds.
+function cancelTTS(requestId: string) {
+  const pending = pendingRequests.get(requestId);
+  if (!pending) return;
+  pendingRequests.delete(requestId);
+  ttsWorker?.postMessage({ type: "cancel", requestId });
+  console.log(`[HTTP] cancel ${requestId.slice(0, 8)} (in-flight=${pendingRequests.size})`);
+  pending.resolve(null); // unblock the awaiting handler; nothing more to write
 }
 
 function getVoiceLang(voiceId: string): string {
@@ -454,6 +474,24 @@ function createExtensionServer() {
       let body = "";
       req.on("data", (chunk) => (body += chunk));
       req.on("end", async () => {
+        const startedAt = Date.now();
+        let requestId: string | null = null;
+        let finished = false;
+        let firstChunkAt = 0;
+        let chunksSent = 0;
+
+        // If the client disconnects before we finish, cancel the worker job so
+        // abandoned clicks don't pile up and starve the next request.
+        const onClose = () => {
+          if (!finished && requestId) {
+            console.log(
+              `[HTTP] client disconnected after ${chunksSent} chunks, ${Date.now() - startedAt}ms`
+            );
+            cancelTTS(requestId);
+          }
+        };
+        res.on("close", onClose);
+
         try {
           const params = JSON.parse(body);
           const { voice, input, speed } = params;
@@ -479,8 +517,16 @@ function createExtensionServer() {
             },
             (msg) => {
               if (msg.type === "chunk") {
+                if (res.writableEnded || res.destroyed) return;
                 const { chunkIndex, totalChunks, base64 } = msg.data;
                 const wavBuffer = Buffer.from(base64, "base64");
+
+                if (!firstChunkAt) {
+                  firstChunkAt = Date.now();
+                  console.log(
+                    `[HTTP] first chunk in ${firstChunkAt - startedAt}ms (${totalChunks} total)`
+                  );
+                }
 
                 // Write chunk header (12 bytes) + WAV data
                 const header = Buffer.alloc(12);
@@ -490,17 +536,22 @@ function createExtensionServer() {
 
                 res.write(header);
                 res.write(wavBuffer);
+                chunksSent++;
               }
-            }
+            },
+            (id) => (requestId = id)
           );
 
-          res.end();
+          finished = true;
+          if (!res.writableEnded) res.end();
+          console.log(`[HTTP] stream done: ${chunksSent} chunks in ${Date.now() - startedAt}ms`);
         } catch (error: any) {
+          finished = true;
           console.error("[HTTP] Streaming error:", error);
           if (!res.headersSent) {
             res.writeHead(500, { "Content-Type": "application/json" });
           }
-          res.end(JSON.stringify({ error: error.message }));
+          if (!res.writableEnded) res.end(JSON.stringify({ error: error.message }));
         }
       });
       return;

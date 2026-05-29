@@ -7,6 +7,11 @@ if (window.__outLoudContentLoaded) {
 } else {
   window.__outLoudContentLoaded = true;
 
+  const OUTLOUD_DEBUG = true;
+  function cslog(...args) {
+    if (OUTLOUD_DEBUG) console.log("[OutLoud:cs]", ...args);
+  }
+
   let debounceTimer = null;
   let lastSelectedText = "";
 
@@ -135,6 +140,8 @@ if (window.__outLoudContentLoaded) {
     const text = block.innerText.trim().slice(0, MAX_READ_CHARS);
     if (!text) return;
 
+    cslog(`click read <${block.tagName.toLowerCase()}> len=${text.length}`);
+
     // brief flash for feedback
     if (readMode.overlay) {
       readMode.overlay.classList.add("out-loud-rm-flash");
@@ -157,6 +164,7 @@ if (window.__outLoudContentLoaded) {
 
   function enableReadMode() {
     if (readMode.active) return;
+    cslog("read mode ON");
     readMode.active = true;
 
     readMode.overlay = document.createElement("div");
@@ -198,6 +206,7 @@ if (window.__outLoudContentLoaded) {
 
   function disableReadMode() {
     if (!readMode.active) return;
+    cslog("read mode OFF");
     readMode.active = false;
 
     document.removeEventListener("mousemove", onReadMove, true);
