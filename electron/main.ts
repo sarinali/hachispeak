@@ -38,6 +38,19 @@ const pendingRequests = new Map<
   }
 >();
 
+// SharedArrayBuffer epoch used to interrupt the worker mid-job. The main process
+// bumps the epoch when a newer request arrives or a client disconnects; the worker
+// reads it synchronously between chunks (a postMessage can't land while ONNX
+// inference is blocking the worker thread) and bails when its epoch is stale.
+const epochBuffer = new SharedArrayBuffer(4);
+const epochView = new Int32Array(epochBuffer);
+let epochCounter = 0;
+
+// Serialize worker jobs so only one runs at a time. Concurrent jobs contend on
+// CPU + the single ONNX session and blow up latency (observed 2.5s -> 15s under
+// load). Newest request wins; older ones are superseded via the epoch above.
+let workerBusy: Promise<unknown> = Promise.resolve();
+
 // Track if app is quitting
 let isAppQuitting = false;
 
@@ -206,7 +219,7 @@ function createTTSWorker() {
   const workerPath = path.join(__dirname, "tts-worker.js");
   console.log("[Worker] Starting from:", workerPath);
 
-  ttsWorker = new Worker(workerPath);
+  ttsWorker = new Worker(workerPath, { workerData: { epochBuffer } });
 
   ttsWorker.on("message", (message) => {
     const { requestId, type, data, error } = message;
@@ -233,6 +246,15 @@ function createTTSWorker() {
       const pending = pendingRequests.get(requestId);
       if (pending) {
         pending.resolve(data);
+        pendingRequests.delete(requestId);
+      }
+    }
+
+    // Worker confirms it stopped a superseded/cancelled job and is now free.
+    if (type === "cancelled") {
+      const pending = pendingRequests.get(requestId);
+      if (pending) {
+        pending.resolve(null);
         pendingRequests.delete(requestId);
       }
     }
@@ -306,12 +328,41 @@ function generateTTS(
 // Cancel an in-flight request (client disconnected). Tells the worker to stop
 // scheduling chunks and settles the pending promise so the HTTP handler unwinds.
 function cancelTTS(requestId: string) {
-  const pending = pendingRequests.get(requestId);
-  if (!pending) return;
-  pendingRequests.delete(requestId);
+  if (!pendingRequests.has(requestId)) return;
+  // Bump the epoch so the running job sees a stale epoch and bails at the next
+  // chunk boundary; the cancel message is a pre-inference fallback. We do NOT
+  // resolve the pending here — the worker posts a terminal "cancelled" message
+  // when it actually stops, which resolves it. That keeps workerBusy held until
+  // the worker is truly free, so the next job doesn't overlap (active stays 1).
+  Atomics.store(epochView, 0, ++epochCounter);
   ttsWorker?.postMessage({ type: "cancel", requestId });
   console.log(`[HTTP] cancel ${requestId.slice(0, 8)} (in-flight=${pendingRequests.size})`);
-  pending.resolve(null); // unblock the awaiting handler; nothing more to write
+}
+
+// Run a TTS job exclusively: claim a new epoch (superseding older jobs), wait for
+// the previous job to finish/yield, then generate. The worker reads the epoch via
+// SharedArrayBuffer and abandons stale jobs at the next chunk boundary.
+function generateExclusive(
+  params: any,
+  onChunk?: (data: any) => void,
+  onRequestId?: (id: string) => void
+): Promise<any> {
+  const myEpoch = ++epochCounter;
+  Atomics.store(epochView, 0, myEpoch); // supersede any older / running job
+  const prev = workerBusy;
+  let release: () => void = () => {};
+  workerBusy = new Promise<void>((r) => (release = r));
+  const run = (async () => {
+    await prev.catch(() => {});
+    // A newer request arrived while we waited — skip ours entirely.
+    if (Atomics.load(epochView, 0) !== myEpoch) return null;
+    return await generateTTS({ ...params, epoch: myEpoch }, onChunk, onRequestId);
+  })();
+  run.then(
+    () => release(),
+    () => release()
+  );
+  return run;
 }
 
 function getVoiceLang(voiceId: string): string {
@@ -504,7 +555,7 @@ function createExtensionServer() {
             "Transfer-Encoding": "chunked",
           });
 
-          await generateTTS(
+          await generateExclusive(
             {
               text: input,
               lang,
@@ -571,7 +622,7 @@ function createExtensionServer() {
 
           // Collect all chunks
           const chunks: Buffer[] = [];
-          await generateTTS(
+          await generateExclusive(
             {
               text: input,
               lang,
