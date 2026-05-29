@@ -24,7 +24,10 @@ class StreamingAudioPlayer {
     this.onError = null;
     this.onChunkChange = null;
     this.audioChunks = [];
+    this.decodedBuffers = []; // decoded AudioBuffer per chunk, index-aligned with chunkTimings
+    this.chunkSources = []; // scheduled source per chunk index (not spliced; used for speed reschedule)
     this.volume = 0.8;
+    this.speed = 1;
     this.playbackStartTime = 0;
     this.scheduledEndTime = 0;
     this.chunkTimings = [];
@@ -38,6 +41,36 @@ class StreamingAudioPlayer {
     if (this.gainNode) {
       this.gainNode.gain.value = vol;
     }
+  }
+
+  // Client-side speed: change playbackRate on sources. Applies instantly with no
+  // re-synthesis. The currently-playing chunk finishes at the old rate; all
+  // not-yet-started chunks are rescheduled from the current chunk's end using the
+  // new rate, and future streamed chunks pick up this.speed automatically.
+  setSpeed(rate) {
+    this.speed = rate;
+    if (!this.audioContext || !this.isPlaying || this.isPaused) return;
+
+    const now = this.audioContext.currentTime;
+    const curIdx = this.getCurrentChunkIndex(now);
+    if (curIdx < 0 || !this.chunkTimings[curIdx]) return;
+
+    let t = this.chunkTimings[curIdx].endTime; // resume scheduling after the current chunk
+    for (let i = curIdx + 1; i < this.decodedBuffers.length; i++) {
+      try {
+        this.chunkSources[i]?.stop();
+      } catch (e) {}
+      const buf = this.decodedBuffers[i];
+      if (!buf) continue;
+      const source = this.createSource(buf);
+      const dur = buf.duration / this.speed;
+      source.start(t);
+      this.chunkTimings[i] = { startTime: t, endTime: t + dur };
+      this.chunkSources[i] = source;
+      this.scheduledSources.push(source);
+      t += dur;
+    }
+    this.scheduledEndTime = t;
   }
 
   getCurrentChunkIndex(currentTime) {
@@ -96,7 +129,7 @@ class StreamingAudioPlayer {
   }
 
   async playCached(chunks) {
-    this.cleanup();
+    this.cleanup(true);
     await this.initAudioContext();
     this.audioChunks = chunks;
     this.allChunksReceived = true;
@@ -111,13 +144,16 @@ class StreamingAudioPlayer {
         const source = this.createSource(audioBuffer);
         source.start(scheduledEndTime);
 
+        const dur = audioBuffer.duration / this.speed;
         this.chunkTimings.push({
           startTime: scheduledEndTime,
-          endTime: scheduledEndTime + audioBuffer.duration,
+          endTime: scheduledEndTime + dur,
         });
 
-        scheduledEndTime += audioBuffer.duration;
+        scheduledEndTime += dur;
         this.scheduledSources.push(source);
+        this.decodedBuffers.push(audioBuffer);
+        this.chunkSources.push(source);
       } catch (e) {
         console.log("Error scheduling cached chunk:", e);
       }
@@ -143,7 +179,7 @@ class StreamingAudioPlayer {
   }
 
   async playStreaming(url, requestBody) {
-    this.cleanup();
+    this.cleanup(true);
     await this.initAudioContext();
     this.allChunksReceived = false;
 
@@ -209,14 +245,17 @@ class StreamingAudioPlayer {
               this.scheduledEndTime = now + 0.01;
             }
 
+            const dur = audioBuffer.duration / this.speed;
             this.chunkTimings.push({
               startTime: this.scheduledEndTime,
-              endTime: this.scheduledEndTime + audioBuffer.duration,
+              endTime: this.scheduledEndTime + dur,
             });
 
             source.start(this.scheduledEndTime);
-            this.scheduledEndTime += audioBuffer.duration;
+            this.scheduledEndTime += dur;
             this.scheduledSources.push(source);
+            this.decodedBuffers.push(audioBuffer);
+            this.chunkSources.push(source);
 
             source.onended = () => {
               const index = this.scheduledSources.indexOf(source);
@@ -250,16 +289,21 @@ class StreamingAudioPlayer {
     if (this.abortController) {
       this.abortController.abort();
     }
-    this.cleanup();
+    // Keep the AudioContext alive so the next utterance reuses it.
+    this.cleanup(true);
   }
 
   // Private helpers
 
   async initAudioContext() {
-    this.audioContext = new AudioContext();
-    this.gainNode = this.audioContext.createGain();
+    // Reuse one AudioContext across utterances (avoids the ~6-context browser
+    // cap and per-play startup latency). Only create if missing/closed.
+    if (!this.audioContext || this.audioContext.state === "closed") {
+      this.audioContext = new AudioContext();
+      this.gainNode = this.audioContext.createGain();
+      this.gainNode.connect(this.audioContext.destination);
+    }
     this.gainNode.gain.value = this.volume;
-    this.gainNode.connect(this.audioContext.destination);
     this.chunkTimings = [];
     this.lastReportedChunk = -1;
 
@@ -271,6 +315,7 @@ class StreamingAudioPlayer {
   createSource(audioBuffer) {
     const source = this.audioContext.createBufferSource();
     source.buffer = audioBuffer;
+    source.playbackRate.value = this.speed;
     source.connect(this.gainNode);
     return source;
   }
@@ -291,9 +336,10 @@ class StreamingAudioPlayer {
     }
   }
 
-  cleanup() {
+  cleanup(keepContext = false) {
     this.cancelAnimation();
     this.isPlaying = false;
+    this.isPaused = false;
 
     for (const source of this.scheduledSources) {
       try {
@@ -302,13 +348,17 @@ class StreamingAudioPlayer {
     }
     this.scheduledSources = [];
 
-    if (this.audioContext && this.audioContext.state !== "closed") {
-      this.audioContext.close().catch(() => {});
+    if (!keepContext) {
+      if (this.audioContext && this.audioContext.state !== "closed") {
+        this.audioContext.close().catch(() => {});
+      }
+      this.audioContext = null;
+      this.gainNode = null;
     }
 
-    this.audioContext = null;
-    this.gainNode = null;
     this.audioChunks = [];
+    this.decodedBuffers = [];
+    this.chunkSources = [];
     this.playbackStartTime = 0;
     this.scheduledEndTime = 0;
     this.chunksReceived = 0;
