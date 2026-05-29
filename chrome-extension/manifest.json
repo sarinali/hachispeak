@@ -3,7 +3,7 @@
   "name": "Out Loud - Text to Speech",
   "version": "1.0.0",
   "description": "Read selected text aloud using AI Text-to-Speech",
-  "permissions": ["activeTab", "storage", "sidePanel", "contextMenus"],
+  "permissions": ["activeTab", "scripting", "storage", "sidePanel", "contextMenus"],
   "host_permissions": ["<all_urls>"],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
