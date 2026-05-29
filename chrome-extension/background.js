@@ -29,8 +29,6 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message) => {
-  if (message.type === "TEXT_SELECTED" || message.type === "PLAY_TEXT") {
-    chrome.runtime.sendMessage(message).catch(() => {});
-  }
-});
+// Note: the side panel listens to chrome.runtime messages directly, so the
+// content script's messages (which carry sender.tab) reach it without a relay.
+// A relay here would strip sender.tab and bypass the active-tab gate.
