@@ -538,7 +538,13 @@ async function generateVoice(
   const isCancelled = () => epochStale(myEpoch) || cancelledRequests.has(requestId);
 
   const tokensPerChunk = MODEL_CONTEXT_WINDOW - 2;
+  const genStart = Date.now();
   const chunks = await preprocessText(params.text, params.lang, tokensPerChunk);
+  // How long phonemization/prep of the WHOLE text took before any inference —
+  // this is the upfront cost that delays the first audio chunk.
+  console.log(
+    `[Worker] preprocess (${requestId.slice(0, 8)}): ${chunks.length} chunks in ${Date.now() - genStart}ms`
+  );
 
   // Get or create ONNX session
   let session: ort.InferenceSession;
@@ -630,9 +636,13 @@ async function generateVoice(
     const style = new ort.Tensor("float32", new Float32Array(ref_s), [1, ref_s.length]);
     const speed = new ort.Tensor("float32", [1], [1]);
 
+    const inferStart = Date.now();
     const result = await session.run({ input_ids, style, speed });
     let waveform = result.waveform.data as Float32Array;
     waveform = trimWaveform(waveform);
+    console.log(
+      `[Worker] chunk ${chunkIdx} infer ${Date.now() - inferStart}ms (t+${Date.now() - genStart}ms since gen start)`
+    );
 
     return { index: chunkIdx, waveform };
   };
