@@ -1,4 +1,4 @@
-import { parentPort } from "worker_threads";
+import { parentPort, workerData } from "worker_threads";
 import * as ort from "onnxruntime-node";
 import * as fs from "fs/promises";
 import { existsSync } from "fs";
@@ -46,9 +46,11 @@ const MODEL_CONTEXT_WINDOW = 512;
 const SAMPLE_RATE = 24000;
 
 // Look-ahead sizes per acceleration mode for streaming processing
+// Lower look-ahead = fewer chunks pre-committed to inference before the epoch
+// check runs between chunks, so a cancelled job bails after ~1 chunk of waste.
 const LOOK_AHEAD_SIZES: Record<string, number> = {
-  cpu: 4,
-  coreml: 3,
+  cpu: 2,
+  coreml: 2,
 };
 
 // Models directory - embedded in the app, asarUnpack'd by electron-builder.
@@ -66,6 +68,23 @@ let cachedModelId: string | null = null;
 
 // Current request ID for progress messages
 let currentRequestId: string | null = null;
+
+// Requests cancelled by the main process (client disconnected mid-stream). The
+// generate loop checks this and stops scheduling new chunks, so abandoned clicks
+// don't keep the worker busy.
+const cancelledRequests = new Set<string>();
+let activeJobs = 0;
+
+// Shared epoch from the main process. When it no longer equals a job's epoch,
+// that job has been superseded (newer request) or its client disconnected, and
+// it should bail at the next chunk boundary. Read synchronously so it works even
+// while ONNX inference is blocking the worker thread (a postMessage can't land).
+const epochView: Int32Array | null = workerData?.epochBuffer
+  ? new Int32Array(workerData.epochBuffer)
+  : null;
+function epochStale(myEpoch: number): boolean {
+  return epochView != null && myEpoch !== 0 && Atomics.load(epochView, 0) !== myEpoch;
+}
 
 // Shutdown flag to abort ongoing work
 let isShuttingDown = false;
@@ -499,21 +518,33 @@ function trimWaveform(waveform: Float32Array): Float32Array {
 
 // createWavBuffer, buildAtempoChain, modifyWavSpeed, wavToMp3 are imported from shared-audio.ts
 
-async function generateVoice(params: {
-  text: string;
-  lang: string;
-  voiceFormula: string;
-  model: string;
-  speed: number;
-  format: "wav" | "mp3";
-  acceleration: "cpu" | "coreml";
-}): Promise<{ buffer: ArrayBuffer; mimeType: string }> {
+async function generateVoice(
+  params: {
+    text: string;
+    lang: string;
+    voiceFormula: string;
+    model: string;
+    speed: number;
+    format: "wav" | "mp3";
+    acceleration: "cpu" | "coreml";
+  },
+  requestId: string
+): Promise<{ buffer: ArrayBuffer; mimeType: string }> {
   if (params.speed < 0.1 || params.speed > 5) {
     throw new Error("Speed must be between 0.1 and 5");
   }
 
+  const myEpoch = (params as { epoch?: number }).epoch ?? 0;
+  const isCancelled = () => epochStale(myEpoch) || cancelledRequests.has(requestId);
+
   const tokensPerChunk = MODEL_CONTEXT_WINDOW - 2;
+  const genStart = Date.now();
   const chunks = await preprocessText(params.text, params.lang, tokensPerChunk);
+  // How long phonemization/prep of the WHOLE text took before any inference —
+  // this is the upfront cost that delays the first audio chunk.
+  console.log(
+    `[Worker] preprocess (${requestId.slice(0, 8)}): ${chunks.length} chunks in ${Date.now() - genStart}ms`
+  );
 
   // Get or create ONNX session
   let session: ort.InferenceSession;
@@ -586,6 +617,11 @@ async function generateVoice(params: {
   const processChunk = async (chunkIdx: number) => {
     const prepared = preparedChunks[chunkIdx];
 
+    // Bail before spending inference on a superseded/cancelled job.
+    if (isCancelled()) {
+      return { index: chunkIdx, waveform: new Float32Array(0) };
+    }
+
     if (prepared.type === "silence") {
       return { index: chunkIdx, waveform: new Float32Array(prepared.silenceLength!) };
     }
@@ -600,15 +636,20 @@ async function generateVoice(params: {
     const style = new ort.Tensor("float32", new Float32Array(ref_s), [1, ref_s.length]);
     const speed = new ort.Tensor("float32", [1], [1]);
 
+    const inferStart = Date.now();
     const result = await session.run({ input_ids, style, speed });
     let waveform = result.waveform.data as Float32Array;
     waveform = trimWaveform(waveform);
+    console.log(
+      `[Worker] chunk ${chunkIdx} infer ${Date.now() - inferStart}ms (t+${Date.now() - genStart}ms since gen start)`
+    );
 
     return { index: chunkIdx, waveform };
   };
 
   // Yield consecutive completed chunks in order
   const yieldReadyChunks = () => {
+    if (isCancelled()) return;
     while (nextToYield < totalChunks && completed[nextToYield]) {
       // Send chunk ready via IPC for streaming playback
       const waveform = results[nextToYield];
@@ -616,7 +657,7 @@ async function generateVoice(params: {
       const base64 = Buffer.from(wavBuffer).toString("base64");
 
       parentPort?.postMessage({
-        requestId: currentRequestId,
+        requestId,
         type: "chunk",
         data: {
           chunkIndex: nextToYield,
@@ -632,6 +673,8 @@ async function generateVoice(params: {
 
   // Fill look-ahead window
   const fillLookAhead = () => {
+    // Stop scheduling new inference work once the client has gone away.
+    if (isCancelled()) return;
     while (inFlight.size < lookAhead && nextToStart < totalChunks) {
       const chunkIdx = nextToStart;
       nextToStart++;
@@ -647,7 +690,7 @@ async function generateVoice(params: {
 
         // Report progress
         parentPort?.postMessage({
-          requestId: currentRequestId,
+          requestId,
           type: "progress",
           data: {
             stage: "inference",
@@ -675,11 +718,23 @@ async function generateVoice(params: {
     if (isShuttingDown) {
       throw new Error("Aborted due to shutdown");
     }
+    // Superseded or client disconnected — stop waiting on remaining inference.
+    if (isCancelled()) {
+      break;
+    }
     if (inFlight.size > 0) {
       await Promise.race(inFlight.values());
     } else {
       break;
     }
+  }
+
+  // If cancelled, bail before the (potentially large) concatenation + encoding.
+  if (isCancelled()) {
+    return {
+      buffer: createWavBuffer(new Float32Array(0), SAMPLE_RATE),
+      mimeType: params.format === "mp3" ? "audio/mpeg" : "audio/wav",
+    };
   }
 
   // Final yield
@@ -747,6 +802,14 @@ parentPort?.on("message", async (message) => {
     return;
   }
 
+  if (type === "cancel") {
+    if (requestId) {
+      cancelledRequests.add(requestId);
+      console.log(`[Worker] cancel (${requestId.slice(0, 8)})`);
+    }
+    return;
+  }
+
   if (type === "generate") {
     if (isShuttingDown) {
       parentPort?.postMessage({
@@ -759,12 +822,20 @@ parentPort?.on("message", async (message) => {
 
     // Store requestId for progress messages
     currentRequestId = requestId;
+    activeJobs++;
+    const startedAt = Date.now();
+    console.log(`[Worker] generate start (${requestId.slice(0, 8)}) active=${activeJobs}`);
 
     try {
-      const result = await generateVoice(data);
+      const result = await generateVoice(data, requestId);
 
-      // Check if we were interrupted
-      if (isShuttingDown) {
+      // Check if we were interrupted (shutdown, supersede, or client disconnect).
+      const reqEpoch = (data && data.epoch) || 0;
+      if (isShuttingDown || cancelledRequests.has(requestId) || epochStale(reqEpoch)) {
+        console.log(`[Worker] generate cancelled (${requestId.slice(0, 8)})`);
+        // Tell main we actually stopped, so it can release the job slot and
+        // resolve the pending request. Without this, workerBusy would hang.
+        parentPort?.postMessage({ requestId, type: "cancelled" });
         return;
       }
 
@@ -780,6 +851,9 @@ parentPort?.on("message", async (message) => {
           mimeType: result.mimeType,
         },
       });
+      console.log(
+        `[Worker] generate done (${requestId.slice(0, 8)}) in ${Date.now() - startedAt}ms`
+      );
     } catch (error: any) {
       // Log full error to the worker's stderr so it surfaces in the Electron
       // main-process console — crucial for diagnosing platform-specific bugs
@@ -799,6 +873,8 @@ parentPort?.on("message", async (message) => {
       }
     } finally {
       currentRequestId = null;
+      cancelledRequests.delete(requestId);
+      activeJobs = Math.max(0, activeJobs - 1);
     }
   }
 });

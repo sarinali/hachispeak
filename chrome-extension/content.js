@@ -7,6 +7,11 @@ if (window.__outLoudContentLoaded) {
 } else {
   window.__outLoudContentLoaded = true;
 
+  const OUTLOUD_DEBUG = true;
+  function cslog(...args) {
+    if (OUTLOUD_DEBUG) console.log("[OutLoud:cs]", ...args);
+  }
+
   let debounceTimer = null;
   let lastSelectedText = "";
 
@@ -44,7 +49,11 @@ if (window.__outLoudContentLoaded) {
   // Block-level elements we'll treat as a readable unit. Walking up from the
   // hovered node, we return the innermost match so we read a paragraph, not the
   // whole page container.
-  const BLOCK_TAGS = new Set([
+  // Semantic text blocks. Note: generic containers (DIV/SECTION/ARTICLE) are
+  // intentionally excluded — including them makes the innermost match a layout
+  // wrapper, so different clicks resolve the same big block. The computed-display
+  // fallback in isReadableBlock() still handles div-soup pages with no semantics.
+  const SEMANTIC_BLOCKS = new Set([
     "P",
     "LI",
     "H1",
@@ -60,10 +69,13 @@ if (window.__outLoudContentLoaded) {
     "DT",
     "FIGCAPTION",
     "PRE",
-    "ARTICLE",
-    "SECTION",
-    "DIV",
+    "CAPTION",
   ]);
+
+  // block-level display values that denote a text block (not a layout container)
+  const BLOCK_DISPLAYS = new Set(["block", "list-item", "table-cell", "flow-root"]);
+
+  const MAX_READ_CHARS = 20000; // safety bound on a single click's text
 
   const readMode = {
     active: false,
@@ -73,12 +85,19 @@ if (window.__outLoudContentLoaded) {
     target: null,
   };
 
+  function isReadableBlock(node) {
+    if (!node.innerText || !node.innerText.trim()) return false;
+    if (SEMANTIC_BLOCKS.has(node.tagName)) return true;
+    const display = getComputedStyle(node).display;
+    return BLOCK_DISPLAYS.has(display);
+  }
+
+  // Climb from the hovered node and return the INNERMOST readable block, so we
+  // read one paragraph/heading, not the page wrapper.
   function resolveBlock(el) {
     let node = el;
     while (node && node !== document.body && node !== document.documentElement) {
-      if (BLOCK_TAGS.has(node.tagName) && node.innerText && node.innerText.trim().length > 0) {
-        return node;
-      }
+      if (isReadableBlock(node)) return node;
       node = node.parentElement;
     }
     return el && el.innerText && el.innerText.trim() ? el : null;
@@ -118,8 +137,10 @@ if (window.__outLoudContentLoaded) {
     e.preventDefault();
     e.stopPropagation();
 
-    const text = block.innerText.trim();
+    const text = block.innerText.trim().slice(0, MAX_READ_CHARS);
     if (!text) return;
+
+    cslog(`click read <${block.tagName.toLowerCase()}> len=${text.length}`);
 
     // brief flash for feedback
     if (readMode.overlay) {
@@ -143,6 +164,7 @@ if (window.__outLoudContentLoaded) {
 
   function enableReadMode() {
     if (readMode.active) return;
+    cslog("read mode ON");
     readMode.active = true;
 
     readMode.overlay = document.createElement("div");
@@ -184,6 +206,7 @@ if (window.__outLoudContentLoaded) {
 
   function disableReadMode() {
     if (!readMode.active) return;
+    cslog("read mode OFF");
     readMode.active = false;
 
     document.removeEventListener("mousemove", onReadMove, true);
