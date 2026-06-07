@@ -437,7 +437,11 @@ async function* preprocessTextStreaming(text, lang, tokensPerChunk) {
                 if (isFirst && shouldSplitFirst && tokens.length > FIRST_CHUNK_TARGET_TOKENS) {
                     isFirst = false;
                     const splitAt = FIRST_CHUNK_TARGET_TOKENS;
-                    yield { type: "text", content: phonemeChunk.slice(0, splitAt), tokens: tokens.slice(0, splitAt) };
+                    yield {
+                        type: "text",
+                        content: phonemeChunk.slice(0, splitAt),
+                        tokens: tokens.slice(0, splitAt),
+                    };
                     const restTokens = tokens.slice(splitAt);
                     if (restTokens.length > 0) {
                         yield { type: "text", content: phonemeChunk.slice(splitAt), tokens: restTokens };
@@ -569,13 +573,21 @@ async function generateVoice(params, requestId) {
                 break;
             if (chunk.type === "silence") {
                 const silenceLength = Math.floor(chunk.durationSeconds * SAMPLE_RATE);
-                preparedChunks.push({ originalIndex: preparedChunks.length, type: "silence", silenceLength });
+                preparedChunks.push({
+                    originalIndex: preparedChunks.length,
+                    type: "silence",
+                    silenceLength,
+                });
             }
             else if (chunk.type === "text") {
                 const tokensLength = chunk.tokens?.length ?? 0;
                 if (tokensLength < 1)
                     continue;
-                preparedChunks.push({ originalIndex: preparedChunks.length, type: "text", tokens: chunk.tokens });
+                preparedChunks.push({
+                    originalIndex: preparedChunks.length,
+                    type: "text",
+                    tokens: chunk.tokens,
+                });
             }
             totalChunks = preparedChunks.length;
             // Wake up the inference loop whenever a new chunk is available
@@ -784,7 +796,10 @@ parentPort?.on("message", async (message) => {
                 // are allocated at their max size — subsequent inferences hit no new allocs.
                 const warmupLen = MODEL_CONTEXT_WINDOW;
                 const dummyTokens = [0, ...Array(warmupLen - 2).fill(16), 0];
-                const input_ids = new ort.Tensor("int64", BigInt64Array.from(dummyTokens.map(BigInt)), [1, warmupLen]);
+                const input_ids = new ort.Tensor("int64", BigInt64Array.from(dummyTokens.map(BigInt)), [
+                    1,
+                    warmupLen,
+                ]);
                 const voices = await getShapedVoiceFile("af_heart");
                 const ref_s = voices[Math.min(warmupLen - 3, voices.length - 1)][0];
                 const style = new ort.Tensor("float32", new Float32Array(ref_s), [1, ref_s.length]);
