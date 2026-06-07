@@ -23,6 +23,17 @@ const UI_DEV_PORT = 51731;
 const EXTENSION_API_PORT = 51730;
 // Keep track of pending TTS requests
 const pendingRequests = new Map();
+// SharedArrayBuffer epoch used to interrupt the worker mid-job. The main process
+// bumps the epoch when a newer request arrives or a client disconnects; the worker
+// reads it synchronously between chunks (a postMessage can't land while ONNX
+// inference is blocking the worker thread) and bails when its epoch is stale.
+const epochBuffer = new SharedArrayBuffer(4);
+const epochView = new Int32Array(epochBuffer);
+let epochCounter = 0;
+// Serialize worker jobs so only one runs at a time. Concurrent jobs contend on
+// CPU + the single ONNX session and blow up latency (observed 2.5s -> 15s under
+// load). Newest request wins; older ones are superseded via the epoch above.
+let workerBusy = Promise.resolve();
 // Track if app is quitting
 let isAppQuitting = false;
 // Tray animation for playing state
@@ -176,7 +187,7 @@ function createTray() {
 function createTTSWorker() {
     const workerPath = path.join(__dirname, "tts-worker.js");
     console.log("[Worker] Starting from:", workerPath);
-    ttsWorker = new Worker(workerPath);
+    ttsWorker = new Worker(workerPath, { workerData: { epochBuffer } });
     ttsWorker.on("message", (message) => {
         const { requestId, type, data, error } = message;
         console.log("[Worker] Message:", type, requestId ? `(${requestId.slice(0, 8)})` : "");
@@ -199,6 +210,14 @@ function createTTSWorker() {
             const pending = pendingRequests.get(requestId);
             if (pending) {
                 pending.resolve(data);
+                pendingRequests.delete(requestId);
+            }
+        }
+        // Worker confirms it stopped a superseded/cancelled job and is now free.
+        if (type === "cancelled") {
+            const pending = pendingRequests.get(requestId);
+            if (pending) {
+                pending.resolve(null);
                 pendingRequests.delete(requestId);
             }
         }
@@ -232,7 +251,7 @@ async function preloadModel() {
         });
     }
 }
-function generateTTS(params, onChunk) {
+function generateTTS(params, onChunk, onRequestId) {
     return new Promise((resolve, reject) => {
         if (!ttsWorker) {
             reject(new Error("TTS Worker not initialized"));
@@ -240,12 +259,48 @@ function generateTTS(params, onChunk) {
         }
         const requestId = crypto.randomUUID();
         pendingRequests.set(requestId, { resolve, reject, onChunk });
+        if (onRequestId)
+            onRequestId(requestId);
+        console.log(`[HTTP] generate ${requestId.slice(0, 8)} queued (in-flight=${pendingRequests.size})`);
         ttsWorker.postMessage({
             type: "generate",
             requestId,
             data: params,
         });
     });
+}
+// Cancel an in-flight request (client disconnected). Tells the worker to stop
+// scheduling chunks and settles the pending promise so the HTTP handler unwinds.
+function cancelTTS(requestId) {
+    if (!pendingRequests.has(requestId))
+        return;
+    // Bump the epoch so the running job sees a stale epoch and bails at the next
+    // chunk boundary; the cancel message is a pre-inference fallback. We do NOT
+    // resolve the pending here — the worker posts a terminal "cancelled" message
+    // when it actually stops, which resolves it. That keeps workerBusy held until
+    // the worker is truly free, so the next job doesn't overlap (active stays 1).
+    Atomics.store(epochView, 0, ++epochCounter);
+    ttsWorker?.postMessage({ type: "cancel", requestId });
+    console.log(`[HTTP] cancel ${requestId.slice(0, 8)} (in-flight=${pendingRequests.size})`);
+}
+// Run a TTS job exclusively: claim a new epoch (superseding older jobs), wait for
+// the previous job to finish/yield, then generate. The worker reads the epoch via
+// SharedArrayBuffer and abandons stale jobs at the next chunk boundary.
+function generateExclusive(params, onChunk, onRequestId) {
+    const myEpoch = ++epochCounter;
+    Atomics.store(epochView, 0, myEpoch); // supersede any older / running job
+    const prev = workerBusy;
+    let release = () => { };
+    workerBusy = new Promise((r) => (release = r));
+    const run = (async () => {
+        await prev.catch(() => { });
+        // A newer request arrived while we waited — skip ours entirely.
+        if (Atomics.load(epochView, 0) !== myEpoch)
+            return null;
+        return await generateTTS({ ...params, epoch: myEpoch }, onChunk, onRequestId);
+    })();
+    run.then(() => release(), () => release());
+    return run;
 }
 function getVoiceLang(voiceId) {
     const prefix = voiceId.substring(0, 2);
@@ -382,6 +437,20 @@ function createExtensionServer() {
             let body = "";
             req.on("data", (chunk) => (body += chunk));
             req.on("end", async () => {
+                const startedAt = Date.now();
+                let requestId = null;
+                let finished = false;
+                let firstChunkAt = 0;
+                let chunksSent = 0;
+                // If the client disconnects before we finish, cancel the worker job so
+                // abandoned clicks don't pile up and starve the next request.
+                const onClose = () => {
+                    if (!finished && requestId) {
+                        console.log(`[HTTP] client disconnected after ${chunksSent} chunks, ${Date.now() - startedAt}ms`);
+                        cancelTTS(requestId);
+                    }
+                };
+                res.on("close", onClose);
                 try {
                     const params = JSON.parse(body);
                     const { voice, input, speed } = params;
@@ -391,7 +460,7 @@ function createExtensionServer() {
                         "Content-Type": "application/octet-stream",
                         "Transfer-Encoding": "chunked",
                     });
-                    await generateTTS({
+                    await generateExclusive({
                         text: input,
                         lang,
                         voiceFormula: voice,
@@ -402,8 +471,14 @@ function createExtensionServer() {
                         streaming: true,
                     }, (msg) => {
                         if (msg.type === "chunk") {
+                            if (res.writableEnded || res.destroyed)
+                                return;
                             const { chunkIndex, totalChunks, base64 } = msg.data;
                             const wavBuffer = Buffer.from(base64, "base64");
+                            if (!firstChunkAt) {
+                                firstChunkAt = Date.now();
+                                console.log(`[HTTP] first chunk in ${firstChunkAt - startedAt}ms (${totalChunks} total)`);
+                            }
                             // Write chunk header (12 bytes) + WAV data
                             const header = Buffer.alloc(12);
                             header.writeUInt32LE(chunkIndex, 0);
@@ -411,16 +486,22 @@ function createExtensionServer() {
                             header.writeUInt32LE(wavBuffer.length, 8);
                             res.write(header);
                             res.write(wavBuffer);
+                            chunksSent++;
                         }
-                    });
-                    res.end();
+                    }, (id) => (requestId = id));
+                    finished = true;
+                    if (!res.writableEnded)
+                        res.end();
+                    console.log(`[HTTP] stream done: ${chunksSent} chunks in ${Date.now() - startedAt}ms`);
                 }
                 catch (error) {
+                    finished = true;
                     console.error("[HTTP] Streaming error:", error);
                     if (!res.headersSent) {
                         res.writeHead(500, { "Content-Type": "application/json" });
                     }
-                    res.end(JSON.stringify({ error: error.message }));
+                    if (!res.writableEnded)
+                        res.end(JSON.stringify({ error: error.message }));
                 }
             });
             return;
@@ -437,7 +518,7 @@ function createExtensionServer() {
                     console.log("[HTTP] Blocking request:", { voice, lang, textLength: input?.length });
                     // Collect all chunks
                     const chunks = [];
-                    await generateTTS({
+                    await generateExclusive({
                         text: input,
                         lang,
                         voiceFormula: voice,
