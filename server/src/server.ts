@@ -1,4 +1,3 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell } from "electron";
 import { Worker } from "worker_threads";
 import * as path from "path";
 import * as fs from "fs";
@@ -8,24 +7,9 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Load app icon from PNG file
-const iconPath = path.join(__dirname, "icon.png");
-const APP_ICON_BASE64 = fs.readFileSync(iconPath).toString("base64");
-
-// Load tray icon (transparent background for macOS template image)
-const trayIconPath = path.join(__dirname, "tray-icon.png");
-const TRAY_ICON_BASE64 = fs.readFileSync(trayIconPath).toString("base64");
-
-// Load Light Cloud logo
-const lightCloudLogoPath = path.join(__dirname, "lightcloud-logo.png");
-const LIGHTCLOUD_LOGO_BASE64 = fs.readFileSync(lightCloudLogoPath).toString("base64");
-
-let mainWindow: BrowserWindow | null = null;
 let ttsWorker: Worker | null = null;
-let tray: Tray | null = null;
 let httpServer: http.Server | null = null;
 
-const UI_DEV_PORT = 51731;
 const EXTENSION_API_PORT = 51730;
 
 // Keep track of pending TTS requests
@@ -51,171 +35,9 @@ let epochCounter = 0;
 // load). Newest request wins; older ones are superseded via the epoch above.
 let workerBusy: Promise<unknown> = Promise.resolve();
 
-// Track if app is quitting
-let isAppQuitting = false;
-
-// Tray animation for playing state
-let trayAnimationInterval: NodeJS.Timeout | null = null;
-let trayAnimationFrame = 0;
-let trayIconDefault: Electron.NativeImage | null = null;
-
-// Create animated sound wave icons (simple bars at different heights)
-function createAnimatedTrayIcon(frame: number): Electron.NativeImage {
-  // 22x22 icon with 3 bars animated
-  const heights = [
-    [4, 8, 4], // frame 0
-    [6, 4, 8], // frame 1
-    [8, 6, 4], // frame 2
-    [4, 8, 6], // frame 3
-  ][frame % 4];
-
-  // Create SVG for the icon
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
-    <rect x="5" y="${11 - heights[0]}" width="3" height="${heights[0] * 2}" rx="1" fill="black"/>
-    <rect x="10" y="${11 - heights[1]}" width="3" height="${heights[1] * 2}" rx="1" fill="black"/>
-    <rect x="15" y="${11 - heights[2]}" width="3" height="${heights[2] * 2}" rx="1" fill="black"/>
-  </svg>`;
-
-  // Convert SVG to data URL for proper image creation
-  const base64Svg = Buffer.from(svg).toString("base64");
-  const icon = nativeImage.createFromDataURL(`data:image/svg+xml;base64,${base64Svg}`);
-  icon.setTemplateImage(true);
-  return icon;
-}
-
-function startTrayAnimation() {
-  if (trayAnimationInterval) return;
-  trayAnimationFrame = 0;
-  trayAnimationInterval = setInterval(() => {
-    if (!tray) return;
-    trayAnimationFrame = (trayAnimationFrame + 1) % 4;
-    const animatedIcon = createAnimatedTrayIcon(trayAnimationFrame);
-    tray.setImage(animatedIcon);
-    tray.setToolTip("Out Loud - Playing");
-  }, 200);
-}
-
-function stopTrayAnimation() {
-  if (trayAnimationInterval) {
-    clearInterval(trayAnimationInterval);
-    trayAnimationInterval = null;
-  }
-  if (tray && trayIconDefault) {
-    tray.setImage(trayIconDefault);
-    tray.setToolTip("Out Loud - Ready");
-  }
-}
-
-// Check if in development mode
-const isDev = process.env.NODE_ENV === "development";
-
-function createWindow() {
-  const preloadPath = path.join(__dirname, "preload.cjs");
-  console.log("[Main] Preload path:", preloadPath);
-
-  const isMac = process.platform === "darwin";
-
-  mainWindow = new BrowserWindow({
-    width: 480,
-    height: 600,
-    minWidth: 400,
-    minHeight: 500,
-    resizable: true,
-    // Frameless-with-traffic-lights only makes sense on macOS. On Windows/Linux
-    // we keep the native frame so users get the expected min/max/close buttons
-    // and OS-native drag, instead of an invisible drag region fighting them.
-    ...(isMac ? { titleBarStyle: "hiddenInset" as const } : { frame: true }),
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-      preload: preloadPath,
-    },
-  });
-
-  // Load React UI - from dev server in development, from built files in production
-  if (isDev) {
-    mainWindow.loadURL(`http://localhost:${UI_DEV_PORT}`);
-  } else {
-    const uiPath = path.join(__dirname, "..", "electron-ui", "dist", "index.html");
-    mainWindow.loadFile(uiPath);
-  }
-
-  // Open external links in default browser
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
-    return { action: "deny" };
-  });
-
-  mainWindow.on("closed", () => {
-    mainWindow = null;
-  });
-
-  // Hide instead of close on macOS
-  mainWindow.on("close", (event) => {
-    if (process.platform === "darwin" && !isAppQuitting) {
-      event.preventDefault();
-      mainWindow?.hide();
-    }
-  });
-}
-
-function createTray() {
-  // Use dedicated tray icon (transparent bg, black waveform for template)
-  const trayIcon = nativeImage.createFromDataURL("data:image/png;base64," + TRAY_ICON_BASE64);
-  trayIcon.setTemplateImage(true);
-  trayIconDefault = trayIcon;
-
-  tray = new Tray(trayIcon);
-  tray.setToolTip("Out Loud - Ready");
-
-  const contextMenu = Menu.buildFromTemplate([
-    {
-      label: "Show Window",
-      click: () => {
-        if (mainWindow) {
-          mainWindow.show();
-          mainWindow.focus();
-        } else {
-          createWindow();
-        }
-      },
-    },
-    { type: "separator" },
-    {
-      label: "About Out Loud",
-      click: () => {
-        const { shell } = require("electron");
-        shell.openExternal("https://out-loud.pro");
-      },
-    },
-    { type: "separator" },
-    {
-      label: "Quit",
-      click: () => {
-        isAppQuitting = true;
-        app.quit();
-      },
-    },
-  ]);
-
-  tray.setContextMenu(contextMenu);
-
-  tray.on("click", () => {
-    if (mainWindow) {
-      if (mainWindow.isVisible()) {
-        mainWindow.hide();
-      } else {
-        mainWindow.show();
-        mainWindow.focus();
-      }
-    } else {
-      createWindow();
-    }
-  });
-}
-
 function createTTSWorker() {
+  // In compiled output, server.js lives at server root (outDir = ..),
+  // and tts-worker.js is also at server root alongside it.
   const workerPath = path.join(__dirname, "tts-worker.js");
   console.log("[Worker] Starting from:", workerPath);
 
@@ -226,7 +48,6 @@ function createTTSWorker() {
     console.log("[Worker] Message:", type, requestId ? `(${requestId.slice(0, 8)})` : "");
 
     if (type === "progress") {
-      mainWindow?.webContents.send("tts:progress", data);
       const pending = pendingRequests.get(requestId);
       if (pending?.onChunk) {
         pending.onChunk({ type: "progress", data });
@@ -403,45 +224,7 @@ function getVoicesList() {
   ];
 }
 
-// Shared settings that sync between Electron app and extensions
-interface SharedSettings {
-  text: string;
-  language: string;
-  voice: string;
-  volume: number;
-  highlightChunk: boolean;
-}
-
-let sharedSettings: SharedSettings = {
-  text: "",
-  language: "en-us",
-  voice: "af_heart",
-  volume: 80,
-  highlightChunk: false,
-};
-
-function getSharedSettings(): SharedSettings {
-  return { ...sharedSettings };
-}
-
-function updateSharedSettings(
-  updates: Partial<SharedSettings>,
-  options: { broadcast?: boolean } = {}
-): SharedSettings {
-  sharedSettings = { ...sharedSettings, ...updates };
-  // Broadcast to the renderer ONLY when the change came from outside the
-  // renderer (e.g. the Chrome extension via the HTTP API). Broadcasting
-  // back to the same renderer that initiated an IPC update races with
-  // subsequent keystrokes: the echo arrives after React has already
-  // applied newer state, so setSettings(broadcast) overwrites unsynced
-  // characters and the textarea looks like it's dropping letters.
-  if (options.broadcast !== false) {
-    mainWindow?.webContents.send("settings:updated", sharedSettings);
-  }
-  return sharedSettings;
-}
-
-// ============ HTTP Server for Extensions ============
+// ============ HTTP Server ============
 
 function createExtensionServer() {
   httpServer = http.createServer(async (req, res) => {
@@ -473,11 +256,7 @@ function createExtensionServer() {
     // GET /api/v1/openapi.yaml - OpenAPI 3.1 spec
     if (req.method === "GET" && url.pathname === "/api/v1/openapi.yaml") {
       try {
-        // In packaged builds, the spec is copied into resources/ via extraResources.
-        // In dev, read it from the repo at docs/app/openapi.yaml.
-        const specPath = app.isPackaged
-          ? path.join(process.resourcesPath, "openapi.yaml")
-          : path.join(__dirname, "..", "docs", "app", "openapi.yaml");
+        const specPath = path.join(__dirname, "..", "..", "docs", "app", "openapi.yaml");
         const spec = fs.readFileSync(specPath, "utf-8");
         res.writeHead(200, { "Content-Type": "application/yaml" });
         res.end(spec);
@@ -492,31 +271,6 @@ function createExtensionServer() {
     if (req.method === "GET" && url.pathname === "/api/v1/audio/voices") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ voices: getVoicesList() }));
-      return;
-    }
-
-    // GET /api/v1/settings - Get shared settings
-    if (req.method === "GET" && url.pathname === "/api/v1/settings") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(getSharedSettings()));
-      return;
-    }
-
-    // POST /api/v1/settings - Update shared settings
-    if (req.method === "POST" && url.pathname === "/api/v1/settings") {
-      let body = "";
-      req.on("data", (chunk) => (body += chunk));
-      req.on("end", () => {
-        try {
-          const updates = JSON.parse(body);
-          const newSettings = updateSharedSettings(updates);
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify(newSettings));
-        } catch (error: any) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: error.message }));
-        }
-      });
       return;
     }
 
@@ -667,148 +421,17 @@ function createExtensionServer() {
 
   httpServer.on("error", (err: NodeJS.ErrnoException) => {
     if (err.code === "EADDRINUSE") {
-      console.error(`[HTTP] Port ${EXTENSION_API_PORT} already in use - extension API disabled`);
+      console.error(`[HTTP] Port ${EXTENSION_API_PORT} already in use`);
     } else {
       console.error("[HTTP] Server error:", err);
     }
   });
 }
 
-// ============ IPC Handlers ============
+// ============ Process Lifecycle ============
 
-// Get available voices
-ipcMain.handle("tts:voices", async () => {
-  return getVoicesList();
-});
-
-// Get shared settings
-ipcMain.handle("settings:get", async () => {
-  return getSharedSettings();
-});
-
-// Update shared settings from the renderer. We deliberately suppress the
-// settings:updated broadcast here — the renderer already has the new state
-// (it called us with it) and a broadcast would race with later keystrokes.
-ipcMain.handle("settings:update", async (_event, updates: Partial<SharedSettings>) => {
-  return updateSharedSettings(updates, { broadcast: false });
-});
-
-// Start streaming TTS generation
-ipcMain.handle("tts:stream:start", async (_event, params) => {
-  const { voice, text, speed } = params;
-  const lang = getVoiceLang(voice);
-
-  console.log("[TTS] Streaming request:", { voice, lang, textLength: text.length });
-
-  try {
-    await generateTTS(
-      {
-        text,
-        lang,
-        voiceFormula: voice,
-        model: "model_q8f16",
-        speed: speed || 1,
-        format: "wav",
-        acceleration: "cpu",
-        streaming: true,
-      },
-      (msg) => {
-        if (msg.type === "chunk") {
-          const { chunkIndex, totalChunks, base64 } = msg.data;
-          mainWindow?.webContents.send("tts:chunk", {
-            chunkIndex,
-            totalChunks,
-            base64,
-          });
-        }
-      }
-    );
-
-    // Send completion signal
-    mainWindow?.webContents.send("tts:complete");
-    return "ok";
-  } catch (error: any) {
-    console.error("[TTS] Streaming error:", error);
-    // Forward a richer payload so the renderer can show enough detail for
-    // users (especially on Windows) to file a meaningful bug report.
-    const payload = `${error.message}\n[${process.platform}/${process.arch}]${
-      error.stack ? `\n${error.stack}` : ""
-    }`;
-    mainWindow?.webContents.send("tts:error", payload);
-    throw error;
-  }
-});
-
-// Get app assets
-ipcMain.handle("app:asset", async (_event, name: string) => {
-  if (name === "icon") {
-    return APP_ICON_BASE64;
-  }
-  if (name === "lightcloud-logo") {
-    return LIGHTCLOUD_LOGO_BASE64;
-  }
-  return "";
-});
-
-// Handle tray playing state
-ipcMain.on("tray:playing", (_event, playing: boolean) => {
-  if (playing) {
-    startTrayAnimation();
-  } else {
-    stopTrayAnimation();
-  }
-});
-
-// Handle quit request
-ipcMain.on("app:quit", () => {
-  isAppQuitting = true;
-  if (mainWindow) {
-    mainWindow.destroy();
-    mainWindow = null;
-  }
-  app.quit();
-});
-
-// ============ App Lifecycle ============
-
-app.whenReady().then(() => {
-  createTTSWorker();
-  createExtensionServer();
-  createTray();
-  createWindow();
-  preloadModel();
-
-  app.on("activate", () => {
-    if (mainWindow) {
-      mainWindow.show();
-    } else {
-      createWindow();
-    }
-  });
-});
-
-app.on("window-all-closed", () => {
-  // Don't quit - keep running in tray
-});
-
-// Track whether we've already finished the synchronous teardown so the
-// second pass through before-quit (after our app.quit() re-fire) doesn't
-// loop forever.
-let quitCleanupDone = false;
-
-app.on("before-quit", (event) => {
-  if (quitCleanupDone) return;
-
-  // Defer the actual quit until we've torn down the worker. If we let
-  // Electron continue here, V8 starts freeing the Node environment and
-  // calls stop_sub_worker_contexts → pthread_join on the TTS worker. With
-  // the worker still alive (especially mid ONNX inference or mid graceful
-  // shutdown), the native ONNX destructor isn't reentrant-safe and the
-  // worker thread aborts → SIGABRT on macOS.
-  event.preventDefault();
-  isAppQuitting = true;
-
-  stopTrayAnimation();
+function shutdown() {
+  console.log("[Server] Shutting down...");
 
   if (httpServer) {
     httpServer.close();
@@ -816,24 +439,27 @@ app.on("before-quit", (event) => {
   }
 
   for (const [, pending] of pendingRequests) {
-    pending.reject(new Error("App is shutting down"));
+    pending.reject(new Error("Server is shutting down"));
   }
   pendingRequests.clear();
-
-  const finishQuit = () => {
-    quitCleanupDone = true;
-    app.quit();
-  };
 
   if (ttsWorker) {
     const worker = ttsWorker;
     ttsWorker = null;
-    // Hard terminate — don't wait for the worker to await its own ONNX
-    // session release. The OS reclaims everything on exit anyway, and a
-    // synchronous kill before V8 teardown is the only reliable way to
-    // avoid the JoinThread crash documented above.
-    worker.terminate().then(finishQuit, finishQuit);
+    worker.terminate().then(
+      () => process.exit(0),
+      () => process.exit(1)
+    );
   } else {
-    finishQuit();
+    process.exit(0);
   }
-});
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+
+// ============ Start ============
+
+createTTSWorker();
+createExtensionServer();
+preloadModel();
