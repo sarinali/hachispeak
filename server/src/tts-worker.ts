@@ -12,6 +12,23 @@ import ESpeakNg from "espeak-ng";
 
 import { createWavBuffer, modifyWavSpeed, wavToMp3 } from "./shared-audio.js";
 
+// Singleton espeak-ng WASM instance. Initialized once with noInitialRun so the
+// expensive WASM startup (memory allocation, embedded FS population, language
+// data loading) only pays once. Subsequent phonemize calls use callMain directly.
+let espeakModule: any = null;
+let espeakModulePromise: Promise<any> | null = null;
+
+async function getEspeakModule(): Promise<any> {
+  if (espeakModule) return espeakModule;
+  if (!espeakModulePromise) {
+    espeakModulePromise = ESpeakNg({ noInitialRun: true }).then((inst: any) => {
+      espeakModule = inst;
+      return inst;
+    });
+  }
+  return espeakModulePromise;
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -367,11 +384,8 @@ async function phonemize(text: string, langId: string): Promise<string> {
   const lang = langsMap[langId] || "en-us";
   text = normalizeText(text);
 
-  const espeakArgs = ["--phonout", "generated", "-q", "--ipa", "-v", lang, text];
-
-  const espeak = await ESpeakNg({
-    arguments: espeakArgs,
-  });
+  const espeak = await getEspeakModule();
+  espeak.callMain(["--phonout", "generated", "-q", "--ipa", "-v", lang, text]);
 
   const generated = espeak.FS.readFile("generated", { encoding: "utf8" });
   return generated.split("\n").join(" ").trim();
@@ -387,8 +401,8 @@ async function phonemizeBatch(texts: string[], langId: string): Promise<string[]
   const lang = langsMap[langId] || "en-us";
   const joined = texts.map((t) => normalizeText(t)).join(BATCH_SEPARATOR);
 
-  const espeakArgs = ["--phonout", "generated", "-q", "--ipa", "-v", lang, joined];
-  const espeak = await ESpeakNg({ arguments: espeakArgs });
+  const espeak = await getEspeakModule();
+  espeak.callMain(["--phonout", "generated", "-q", "--ipa", "-v", lang, joined]);
   const generated = espeak.FS.readFile("generated", { encoding: "utf8" });
   const fullPhonemes = generated.split("\n").join(" ").trim();
 
@@ -960,6 +974,15 @@ parentPort?.on("message", async (message) => {
       console.log("Model preloaded successfully");
     } catch (error) {
       console.error("Failed to preload model:", error);
+    }
+
+    // Pre-warm espeak-ng WASM in parallel with model load so the singleton is
+    // ready before the first real request arrives.
+    try {
+      await getEspeakModule();
+      console.log("espeak-ng preloaded successfully");
+    } catch (error) {
+      console.error("Failed to preload espeak-ng:", error);
     }
     return;
   }
