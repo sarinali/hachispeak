@@ -1,0 +1,32 @@
+name: Auto-fix
+
+on:
+  push:
+    branches-ignore: [main]
+
+jobs:
+  auto-fix:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Fix formatting
+        run: npm run fmt
+
+      - name: Commit fixes
+        run: |
+          git diff --quiet && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore: auto-fix formatting"
+          git push
