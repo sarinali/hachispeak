@@ -1,4 +1,4 @@
-import { parentPort } from "worker_threads";
+import { parentPort, workerData } from "worker_threads";
 import * as ort from "onnxruntime-node";
 import * as fs from "fs/promises";
 import { existsSync } from "fs";
@@ -45,9 +45,11 @@ else {
 const MODEL_CONTEXT_WINDOW = 512;
 const SAMPLE_RATE = 24000;
 // Look-ahead sizes per acceleration mode for streaming processing
+// Lower look-ahead = fewer chunks pre-committed to inference before the epoch
+// check runs between chunks, so a cancelled job bails after ~1 chunk of waste.
 const LOOK_AHEAD_SIZES = {
-    cpu: 4,
-    coreml: 3,
+    cpu: 1,
+    coreml: 2,
 };
 // Models directory - embedded in the app, asarUnpack'd by electron-builder.
 const MODELS_DIR = resolveUnpacked(path.join(__dirname, "models")) ?? path.join(__dirname, "models");
@@ -60,6 +62,21 @@ let cachedSession = null;
 let cachedModelId = null;
 // Current request ID for progress messages
 let currentRequestId = null;
+// Requests cancelled by the main process (client disconnected mid-stream). The
+// generate loop checks this and stops scheduling new chunks, so abandoned clicks
+// don't keep the worker busy.
+const cancelledRequests = new Set();
+let activeJobs = 0;
+// Shared epoch from the main process. When it no longer equals a job's epoch,
+// that job has been superseded (newer request) or its client disconnected, and
+// it should bail at the next chunk boundary. Read synchronously so it works even
+// while ONNX inference is blocking the worker thread (a postMessage can't land).
+const epochView = workerData?.epochBuffer
+    ? new Int32Array(workerData.epochBuffer)
+    : null;
+function epochStale(myEpoch) {
+    return epochView != null && myEpoch !== 0 && Atomics.load(epochView, 0) !== myEpoch;
+}
 // Shutdown flag to abort ongoing work
 let isShuttingDown = false;
 // Tokenizer vocab - all keys must be properly quoted strings
@@ -207,7 +224,11 @@ async function getVoiceFile(id) {
     console.log("Loaded embedded voice:", voicePath);
     return new Uint8Array(data).buffer;
 }
+const voiceCache = new Map();
 async function getShapedVoiceFile(id) {
+    const cached = voiceCache.get(id);
+    if (cached)
+        return cached;
     const voice = await getVoiceFile(id);
     const voiceArray = new Float32Array(voice);
     const voiceArrayLen = voiceArray.length;
@@ -217,6 +238,7 @@ async function getShapedVoiceFile(id) {
         const chunk = Array.from(voiceArray.slice(from, to));
         reshaped.push([chunk]);
     }
+    voiceCache.set(id, reshaped);
     return reshaped;
 }
 function parseVoiceFormula(formula) {
@@ -312,6 +334,26 @@ async function phonemize(text, langId) {
     const generated = espeak.FS.readFile("generated", { encoding: "utf8" });
     return generated.split("\n").join(" ").trim();
 }
+const BATCH_SEPARATOR = " — ";
+const BATCH_SEPARATOR_PHONEME = "—";
+async function phonemizeBatch(texts, langId) {
+    if (texts.length === 0)
+        return [];
+    if (texts.length === 1)
+        return [await phonemize(texts[0], langId)];
+    const lang = langsMap[langId] || "en-us";
+    const joined = texts.map((t) => normalizeText(t)).join(BATCH_SEPARATOR);
+    const espeakArgs = ["--phonout", "generated", "-q", "--ipa", "-v", lang, joined];
+    const espeak = await ESpeakNg({ arguments: espeakArgs });
+    const generated = espeak.FS.readFile("generated", { encoding: "utf8" });
+    const fullPhonemes = generated.split("\n").join(" ").trim();
+    const parts = fullPhonemes.split(BATCH_SEPARATOR_PHONEME);
+    if (parts.length === texts.length) {
+        return parts.map((p) => p.trim());
+    }
+    // Fallback: if separator didn't split cleanly, phonemize individually
+    return Promise.all(texts.map((t) => phonemize(t, langId)));
+}
 function sanitizeText(rawText) {
     return rawText
         .replace(/\.\s+/g, "[0.4s]")
@@ -354,24 +396,83 @@ function createPhonemeSubChunks(phonemes, tokensPerChunk) {
     }
     return chunks;
 }
-async function preprocessText(text, lang, tokensPerChunk) {
-    const chunks = [];
+// Target token count for the very first chunk — smaller = faster first audio.
+// ~15 tokens infers in ~500ms vs ~1100ms for 54 tokens.
+const FIRST_CHUNK_TARGET_TOKENS = 15;
+/**
+ * Incrementally preprocesses text, yielding chunks as each segment is phonemized.
+ * This allows inference to start on the first chunk while later segments are still
+ * being phonemized — eliminating the upfront preprocessing wall for long text.
+ *
+ * Strategy:
+ * 1. Phonemize the first text segment alone (fast, single espeak call)
+ * 2. Split it into a small initial chunk for minimum time-to-first-audio
+ *    (only when there are multiple segments — short text plays without splitting)
+ * 3. Batch-phonemize all remaining segments in one espeak call (amortizes WASM startup)
+ */
+async function* preprocessTextStreaming(text, lang, tokensPerChunk) {
     const sanitized = sanitizeText(text);
     const segments = segmentText(sanitized);
+    // Count text segments to decide whether to split the first chunk
+    const textSegments = segments.filter((s) => !isSilenceMarker(s));
+    const shouldSplitFirst = textSegments.length > 1;
+    let isFirst = true;
+    let firstTextSegmentDone = false;
+    const remainingTextSegments = [];
     for (const segment of segments) {
         if (isSilenceMarker(segment)) {
-            const durationSeconds = extractSilenceDuration(segment);
-            chunks.push({ type: "silence", durationSeconds });
+            if (firstTextSegmentDone) {
+                remainingTextSegments.push(`__SILENCE__${extractSilenceDuration(segment)}`);
+            }
+            else {
+                yield { type: "silence", durationSeconds: extractSilenceDuration(segment) };
+            }
             continue;
         }
-        const phonemized = await phonemize(segment, lang);
-        const phonemizedChunks = createPhonemeSubChunks(phonemized, tokensPerChunk);
-        for (const phonemeChunk of phonemizedChunks) {
-            const tokens = tokenize(phonemeChunk);
-            chunks.push({ type: "text", content: phonemeChunk, tokens });
+        if (!firstTextSegmentDone) {
+            const phonemized = await phonemize(segment, lang);
+            const phonemizedChunks = createPhonemeSubChunks(phonemized, tokensPerChunk);
+            for (const phonemeChunk of phonemizedChunks) {
+                const tokens = tokenize(phonemeChunk);
+                if (isFirst && shouldSplitFirst && tokens.length > FIRST_CHUNK_TARGET_TOKENS) {
+                    isFirst = false;
+                    const splitAt = FIRST_CHUNK_TARGET_TOKENS;
+                    yield { type: "text", content: phonemeChunk.slice(0, splitAt), tokens: tokens.slice(0, splitAt) };
+                    const restTokens = tokens.slice(splitAt);
+                    if (restTokens.length > 0) {
+                        yield { type: "text", content: phonemeChunk.slice(splitAt), tokens: restTokens };
+                    }
+                }
+                else {
+                    isFirst = false;
+                    yield { type: "text", content: phonemeChunk, tokens };
+                }
+            }
+            firstTextSegmentDone = true;
+        }
+        else {
+            remainingTextSegments.push(segment);
         }
     }
-    return chunks;
+    // Batch-phonemize all remaining text segments in a single espeak call
+    if (remainingTextSegments.length > 0) {
+        const textOnly = remainingTextSegments.filter((s) => !s.startsWith("__SILENCE__"));
+        const phonemizedBatch = textOnly.length > 0 ? await phonemizeBatch(textOnly, lang) : [];
+        let phonemeIdx = 0;
+        for (const segment of remainingTextSegments) {
+            if (segment.startsWith("__SILENCE__")) {
+                const dur = parseFloat(segment.slice("__SILENCE__".length));
+                yield { type: "silence", durationSeconds: dur };
+                continue;
+            }
+            const phonemized = phonemizedBatch[phonemeIdx++];
+            const phonemizedChunks = createPhonemeSubChunks(phonemized, tokensPerChunk);
+            for (const phonemeChunk of phonemizedChunks) {
+                const tokens = tokenize(phonemeChunk);
+                yield { type: "text", content: phonemeChunk, tokens };
+            }
+        }
+    }
 }
 function trimWaveform(waveform) {
     const windowSize = 256;
@@ -425,13 +526,15 @@ function trimWaveform(waveform) {
     return waveform.slice(startSample, endSample);
 }
 // createWavBuffer, buildAtempoChain, modifyWavSpeed, wavToMp3 are imported from shared-audio.ts
-async function generateVoice(params) {
+async function generateVoice(params, requestId) {
     if (params.speed < 0.1 || params.speed > 5) {
         throw new Error("Speed must be between 0.1 and 5");
     }
+    const myEpoch = params.epoch ?? 0;
+    const isCancelled = () => epochStale(myEpoch) || cancelledRequests.has(requestId);
     const tokensPerChunk = MODEL_CONTEXT_WINDOW - 2;
-    const chunks = await preprocessText(params.text, params.lang, tokensPerChunk);
-    // Get or create ONNX session
+    const genStart = Date.now();
+    // Get or create ONNX session (do this first so it's ready when chunks arrive)
     let session;
     if (cachedSession && cachedModelId === params.model) {
         session = cachedSession;
@@ -446,6 +549,8 @@ async function generateVoice(params) {
         executionProviders.push("cpu");
         session = await ort.InferenceSession.create(Buffer.from(modelBuffer), {
             executionProviders,
+            graphOptimizationLevel: "all",
+            enableCpuMemArena: true,
         });
         cachedSession = session;
         cachedModelId = params.model;
@@ -454,27 +559,48 @@ async function generateVoice(params) {
     const combinedVoice = await combineVoices(voices);
     const lookAhead = LOOK_AHEAD_SIZES[params.acceleration] || 3;
     const preparedChunks = [];
-    for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
-        if (chunk.type === "silence") {
-            const silenceLength = Math.floor(chunk.durationSeconds * SAMPLE_RATE);
-            preparedChunks.push({ originalIndex: i, type: "silence", silenceLength });
-        }
-        else if (chunk.type === "text") {
-            const tokensLength = chunk.tokens?.length ?? 0;
-            if (tokensLength < 1) {
-                continue;
+    let preprocessDone = false;
+    let totalChunks = 0; // updated as we discover chunks
+    // Kick off streaming preprocess in the background
+    const preprocessPromise = (async () => {
+        const stream = preprocessTextStreaming(params.text, params.lang, tokensPerChunk);
+        for await (const chunk of stream) {
+            if (isCancelled())
+                break;
+            if (chunk.type === "silence") {
+                const silenceLength = Math.floor(chunk.durationSeconds * SAMPLE_RATE);
+                preparedChunks.push({ originalIndex: preparedChunks.length, type: "silence", silenceLength });
             }
-            preparedChunks.push({ originalIndex: i, type: "text", tokens: chunk.tokens });
+            else if (chunk.type === "text") {
+                const tokensLength = chunk.tokens?.length ?? 0;
+                if (tokensLength < 1)
+                    continue;
+                preparedChunks.push({ originalIndex: preparedChunks.length, type: "text", tokens: chunk.tokens });
+            }
+            totalChunks = preparedChunks.length;
+            // Wake up the inference loop whenever a new chunk is available
+            wakeInference();
+        }
+        preprocessDone = true;
+        console.log(`[Worker] preprocess (${requestId.slice(0, 8)}): ${preparedChunks.length} chunks in ${Date.now() - genStart}ms`);
+        wakeInference();
+    })();
+    // Signaling mechanism to wake the inference loop when new chunks arrive
+    let wakeResolve = null;
+    function wakeInference() {
+        if (wakeResolve) {
+            wakeResolve();
+            wakeResolve = null;
         }
     }
-    const totalChunks = preparedChunks.length;
-    if (totalChunks === 0) {
-        throw new Error("No chunks to process");
+    function waitForChunks() {
+        return new Promise((resolve) => {
+            wakeResolve = resolve;
+        });
     }
-    // Results array and tracking
-    const results = new Array(totalChunks);
-    const completed = new Array(totalChunks).fill(false);
+    // Results array (grows dynamically as totalChunks increases)
+    const results = [];
+    const completed = [];
     let nextToYield = 0;
     let nextToStart = 0;
     let completedCount = 0;
@@ -483,6 +609,9 @@ async function generateVoice(params) {
     // Process a single chunk
     const processChunk = async (chunkIdx) => {
         const prepared = preparedChunks[chunkIdx];
+        if (isCancelled()) {
+            return { index: chunkIdx, waveform: new Float32Array(0) };
+        }
         if (prepared.type === "silence") {
             return { index: chunkIdx, waveform: new Float32Array(prepared.silenceLength) };
         }
@@ -495,24 +624,29 @@ async function generateVoice(params) {
         ]);
         const style = new ort.Tensor("float32", new Float32Array(ref_s), [1, ref_s.length]);
         const speed = new ort.Tensor("float32", [1], [1]);
+        const inferStart = Date.now();
         const result = await session.run({ input_ids, style, speed });
         let waveform = result.waveform.data;
         waveform = trimWaveform(waveform);
+        console.log(`[Worker] chunk ${chunkIdx} infer ${Date.now() - inferStart}ms (t+${Date.now() - genStart}ms since gen start)`);
         return { index: chunkIdx, waveform };
     };
     // Yield consecutive completed chunks in order
     const yieldReadyChunks = () => {
+        if (isCancelled())
+            return;
+        // Use the current known totalChunks for reporting; final value is set when preprocess finishes
+        const reportTotal = preprocessDone ? totalChunks : 0;
         while (nextToYield < totalChunks && completed[nextToYield]) {
-            // Send chunk ready via IPC for streaming playback
             const waveform = results[nextToYield];
             const wavBuffer = createWavBuffer(waveform, SAMPLE_RATE);
             const base64 = Buffer.from(wavBuffer).toString("base64");
             parentPort?.postMessage({
-                requestId: currentRequestId,
+                requestId,
                 type: "chunk",
                 data: {
                     chunkIndex: nextToYield,
-                    totalChunks,
+                    totalChunks: reportTotal || nextToYield + 1,
                     base64,
                     mimeType: "audio/wav",
                 },
@@ -520,11 +654,18 @@ async function generateVoice(params) {
             nextToYield++;
         }
     };
-    // Fill look-ahead window
+    // Fill look-ahead window from available prepared chunks
     const fillLookAhead = () => {
-        while (inFlight.size < lookAhead && nextToStart < totalChunks) {
+        if (isCancelled())
+            return;
+        while (inFlight.size < lookAhead && nextToStart < preparedChunks.length) {
             const chunkIdx = nextToStart;
             nextToStart++;
+            // Ensure results arrays are large enough
+            while (results.length <= chunkIdx) {
+                results.push(new Float32Array(0));
+                completed.push(false);
+            }
             const promise = processChunk(chunkIdx);
             inFlight.set(chunkIdx, promise);
             promise.then((result) => {
@@ -532,38 +673,52 @@ async function generateVoice(params) {
                 completed[result.index] = true;
                 completedCount++;
                 inFlight.delete(result.index);
-                // Report progress
                 parentPort?.postMessage({
-                    requestId: currentRequestId,
+                    requestId,
                     type: "progress",
                     data: {
                         stage: "inference",
                         completed: completedCount,
-                        total: totalChunks,
-                        percent: Math.round((completedCount / totalChunks) * 100),
+                        total: totalChunks || completedCount,
+                        percent: totalChunks ? Math.round((completedCount / totalChunks) * 100) : 0,
                     },
                 });
-                // Yield any chunks that are ready (in order)
                 yieldReadyChunks();
-                // Fill look-ahead with more work
                 fillLookAhead();
             });
         }
     };
-    // Start processing
+    // Main inference loop: consumes chunks as they're produced by the preprocessor
     fillLookAhead();
-    // Wait for all to complete
-    while (completedCount < totalChunks) {
-        // Check for shutdown
+    while (true) {
         if (isShuttingDown) {
             throw new Error("Aborted due to shutdown");
         }
+        if (isCancelled())
+            break;
+        // Are we done? All chunks preprocessed and all completed
+        if (preprocessDone && completedCount >= totalChunks)
+            break;
+        // Try to fill look-ahead (new chunks may have arrived from preprocessor)
+        fillLookAhead();
+        // Wait for either inference completion or new chunks from preprocessor
         if (inFlight.size > 0) {
-            await Promise.race(inFlight.values());
+            await Promise.race([...inFlight.values(), waitForChunks()]);
+        }
+        else if (!preprocessDone) {
+            await waitForChunks();
         }
         else {
             break;
         }
+    }
+    // Wait for preprocess to fully finish (it should be done by now)
+    await preprocessPromise;
+    if (isCancelled()) {
+        return {
+            buffer: createWavBuffer(new Float32Array(0), SAMPLE_RATE),
+            mimeType: params.format === "mp3" ? "audio/mpeg" : "audio/wav",
+        };
     }
     // Final yield
     yieldReadyChunks();
@@ -615,11 +770,39 @@ parentPort?.on("message", async (message) => {
             return;
         try {
             console.log("Preloading model:", data.model);
-            await getModel(data.model);
+            const modelBuffer = await getModel(data.model);
+            if (!cachedSession || cachedModelId !== data.model) {
+                const session = await ort.InferenceSession.create(Buffer.from(modelBuffer), {
+                    executionProviders: ["cpu"],
+                    graphOptimizationLevel: "all",
+                    enableCpuMemArena: true,
+                });
+                cachedSession = session;
+                cachedModelId = data.model;
+                // Run a realistic-size dummy inference to warm up ONNX internal allocators.
+                // Uses a full-context-window token sequence so that all internal buffers
+                // are allocated at their max size — subsequent inferences hit no new allocs.
+                const warmupLen = MODEL_CONTEXT_WINDOW;
+                const dummyTokens = [0, ...Array(warmupLen - 2).fill(16), 0];
+                const input_ids = new ort.Tensor("int64", BigInt64Array.from(dummyTokens.map(BigInt)), [1, warmupLen]);
+                const voices = await getShapedVoiceFile("af_heart");
+                const ref_s = voices[Math.min(warmupLen - 3, voices.length - 1)][0];
+                const style = new ort.Tensor("float32", new Float32Array(ref_s), [1, ref_s.length]);
+                const speed = new ort.Tensor("float32", [1], [1]);
+                await session.run({ input_ids, style, speed });
+                console.log("Model session warmed up");
+            }
             console.log("Model preloaded successfully");
         }
         catch (error) {
             console.error("Failed to preload model:", error);
+        }
+        return;
+    }
+    if (type === "cancel") {
+        if (requestId) {
+            cancelledRequests.add(requestId);
+            console.log(`[Worker] cancel (${requestId.slice(0, 8)})`);
         }
         return;
     }
@@ -634,10 +817,18 @@ parentPort?.on("message", async (message) => {
         }
         // Store requestId for progress messages
         currentRequestId = requestId;
+        activeJobs++;
+        const startedAt = Date.now();
+        console.log(`[Worker] generate start (${requestId.slice(0, 8)}) active=${activeJobs}`);
         try {
-            const result = await generateVoice(data);
-            // Check if we were interrupted
-            if (isShuttingDown) {
+            const result = await generateVoice(data, requestId);
+            // Check if we were interrupted (shutdown, supersede, or client disconnect).
+            const reqEpoch = (data && data.epoch) || 0;
+            if (isShuttingDown || cancelledRequests.has(requestId) || epochStale(reqEpoch)) {
+                console.log(`[Worker] generate cancelled (${requestId.slice(0, 8)})`);
+                // Tell main we actually stopped, so it can release the job slot and
+                // resolve the pending request. Without this, workerBusy would hang.
+                parentPort?.postMessage({ requestId, type: "cancelled" });
                 return;
             }
             // Convert ArrayBuffer to base64 for IPC transfer
@@ -651,6 +842,7 @@ parentPort?.on("message", async (message) => {
                     mimeType: result.mimeType,
                 },
             });
+            console.log(`[Worker] generate done (${requestId.slice(0, 8)}) in ${Date.now() - startedAt}ms`);
         }
         catch (error) {
             // Log full error to the worker's stderr so it surfaces in the Electron
@@ -672,6 +864,8 @@ parentPort?.on("message", async (message) => {
         }
         finally {
             currentRequestId = null;
+            cancelledRequests.delete(requestId);
+            activeJobs = Math.max(0, activeJobs - 1);
         }
     }
 });

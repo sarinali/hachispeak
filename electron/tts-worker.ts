@@ -49,7 +49,7 @@ const SAMPLE_RATE = 24000;
 // Lower look-ahead = fewer chunks pre-committed to inference before the epoch
 // check runs between chunks, so a cancelled job bails after ~1 chunk of waste.
 const LOOK_AHEAD_SIZES: Record<string, number> = {
-  cpu: 2,
+  cpu: 1,
   coreml: 2,
 };
 
@@ -239,7 +239,12 @@ async function getVoiceFile(id: string): Promise<ArrayBuffer> {
   return new Uint8Array(data).buffer;
 }
 
+const voiceCache = new Map<string, number[][][]>();
+
 async function getShapedVoiceFile(id: string): Promise<number[][][]> {
+  const cached = voiceCache.get(id);
+  if (cached) return cached;
+
   const voice = await getVoiceFile(id);
   const voiceArray = new Float32Array(voice);
   const voiceArrayLen = voiceArray.length;
@@ -251,6 +256,7 @@ async function getShapedVoiceFile(id: string): Promise<number[][][]> {
     reshaped.push([chunk]);
   }
 
+  voiceCache.set(id, reshaped);
   return reshaped;
 }
 
@@ -370,6 +376,29 @@ async function phonemize(text: string, langId: string): Promise<string> {
   return generated.split("\n").join(" ").trim();
 }
 
+const BATCH_SEPARATOR = " — ";
+const BATCH_SEPARATOR_PHONEME = "—";
+
+async function phonemizeBatch(texts: string[], langId: string): Promise<string[]> {
+  if (texts.length === 0) return [];
+  if (texts.length === 1) return [await phonemize(texts[0], langId)];
+
+  const lang = langsMap[langId] || "en-us";
+  const joined = texts.map((t) => normalizeText(t)).join(BATCH_SEPARATOR);
+
+  const espeakArgs = ["--phonout", "generated", "-q", "--ipa", "-v", lang, joined];
+  const espeak = await ESpeakNg({ arguments: espeakArgs });
+  const generated = espeak.FS.readFile("generated", { encoding: "utf8" });
+  const fullPhonemes = generated.split("\n").join(" ").trim();
+
+  const parts = fullPhonemes.split(BATCH_SEPARATOR_PHONEME);
+  if (parts.length === texts.length) {
+    return parts.map((p) => p.trim());
+  }
+  // Fallback: if separator didn't split cleanly, phonemize individually
+  return Promise.all(texts.map((t) => phonemize(t, langId)));
+}
+
 function sanitizeText(rawText: string): string {
   return rawText
     .replace(/\.\s+/g, "[0.4s]")
@@ -431,32 +460,99 @@ interface SilenceChunk {
 
 type TextProcessorChunk = TextChunk | SilenceChunk;
 
-async function preprocessText(
+// Target token count for the very first chunk — smaller = faster first audio.
+// ~15 tokens infers in ~500ms vs ~1100ms for 54 tokens.
+const FIRST_CHUNK_TARGET_TOKENS = 15;
+
+/**
+ * Incrementally preprocesses text, yielding chunks as each segment is phonemized.
+ * This allows inference to start on the first chunk while later segments are still
+ * being phonemized — eliminating the upfront preprocessing wall for long text.
+ *
+ * Strategy:
+ * 1. Phonemize the first text segment alone (fast, single espeak call)
+ * 2. Split it into a small initial chunk for minimum time-to-first-audio
+ *    (only when there are multiple segments — short text plays without splitting)
+ * 3. Batch-phonemize all remaining segments in one espeak call (amortizes WASM startup)
+ */
+async function* preprocessTextStreaming(
   text: string,
   lang: string,
   tokensPerChunk: number
-): Promise<TextProcessorChunk[]> {
-  const chunks: TextProcessorChunk[] = [];
+): AsyncGenerator<TextProcessorChunk> {
   const sanitized = sanitizeText(text);
   const segments = segmentText(sanitized);
 
+  // Count text segments to decide whether to split the first chunk
+  const textSegments = segments.filter((s) => !isSilenceMarker(s));
+  const shouldSplitFirst = textSegments.length > 1;
+
+  let isFirst = true;
+  let firstTextSegmentDone = false;
+  const remainingTextSegments: string[] = [];
+
   for (const segment of segments) {
     if (isSilenceMarker(segment)) {
-      const durationSeconds = extractSilenceDuration(segment);
-      chunks.push({ type: "silence", durationSeconds });
+      if (firstTextSegmentDone) {
+        remainingTextSegments.push(`__SILENCE__${extractSilenceDuration(segment)}`);
+      } else {
+        yield { type: "silence", durationSeconds: extractSilenceDuration(segment) };
+      }
       continue;
     }
 
-    const phonemized = await phonemize(segment, lang);
-    const phonemizedChunks = createPhonemeSubChunks(phonemized, tokensPerChunk);
+    if (!firstTextSegmentDone) {
+      const phonemized = await phonemize(segment, lang);
+      const phonemizedChunks = createPhonemeSubChunks(phonemized, tokensPerChunk);
 
-    for (const phonemeChunk of phonemizedChunks) {
-      const tokens = tokenize(phonemeChunk);
-      chunks.push({ type: "text", content: phonemeChunk, tokens });
+      for (const phonemeChunk of phonemizedChunks) {
+        const tokens = tokenize(phonemeChunk);
+
+        if (isFirst && shouldSplitFirst && tokens.length > FIRST_CHUNK_TARGET_TOKENS) {
+          isFirst = false;
+          const splitAt = FIRST_CHUNK_TARGET_TOKENS;
+          yield {
+            type: "text",
+            content: phonemeChunk.slice(0, splitAt),
+            tokens: tokens.slice(0, splitAt),
+          };
+          const restTokens = tokens.slice(splitAt);
+          if (restTokens.length > 0) {
+            yield { type: "text", content: phonemeChunk.slice(splitAt), tokens: restTokens };
+          }
+        } else {
+          isFirst = false;
+          yield { type: "text", content: phonemeChunk, tokens };
+        }
+      }
+      firstTextSegmentDone = true;
+    } else {
+      remainingTextSegments.push(segment);
     }
   }
 
-  return chunks;
+  // Batch-phonemize all remaining text segments in a single espeak call
+  if (remainingTextSegments.length > 0) {
+    const textOnly = remainingTextSegments.filter((s) => !s.startsWith("__SILENCE__"));
+    const phonemizedBatch = textOnly.length > 0 ? await phonemizeBatch(textOnly, lang) : [];
+
+    let phonemeIdx = 0;
+    for (const segment of remainingTextSegments) {
+      if (segment.startsWith("__SILENCE__")) {
+        const dur = parseFloat(segment.slice("__SILENCE__".length));
+        yield { type: "silence", durationSeconds: dur };
+        continue;
+      }
+
+      const phonemized = phonemizedBatch[phonemeIdx++];
+      const phonemizedChunks = createPhonemeSubChunks(phonemized, tokensPerChunk);
+
+      for (const phonemeChunk of phonemizedChunks) {
+        const tokens = tokenize(phonemeChunk);
+        yield { type: "text", content: phonemeChunk, tokens };
+      }
+    }
+  }
 }
 
 function trimWaveform(waveform: Float32Array): Float32Array {
@@ -539,14 +635,8 @@ async function generateVoice(
 
   const tokensPerChunk = MODEL_CONTEXT_WINDOW - 2;
   const genStart = Date.now();
-  const chunks = await preprocessText(params.text, params.lang, tokensPerChunk);
-  // How long phonemization/prep of the WHOLE text took before any inference —
-  // this is the upfront cost that delays the first audio chunk.
-  console.log(
-    `[Worker] preprocess (${requestId.slice(0, 8)}): ${chunks.length} chunks in ${Date.now() - genStart}ms`
-  );
 
-  // Get or create ONNX session
+  // Get or create ONNX session (do this first so it's ready when chunks arrive)
   let session: ort.InferenceSession;
   if (cachedSession && cachedModelId === params.model) {
     session = cachedSession;
@@ -563,6 +653,8 @@ async function generateVoice(
 
     session = await ort.InferenceSession.create(Buffer.from(modelBuffer), {
       executionProviders,
+      graphOptimizationLevel: "all",
+      enableCpuMemArena: true,
     });
 
     cachedSession = session;
@@ -574,7 +666,11 @@ async function generateVoice(
 
   const lookAhead = LOOK_AHEAD_SIZES[params.acceleration] || 3;
 
-  // Prepare all chunks - categorize and pre-compute what we can
+  // --- Streaming preprocess + inference pipeline ---
+  // Instead of phonemizing ALL text upfront, we interleave preprocessing and
+  // inference: as each segment is phonemized it becomes available for inference
+  // immediately, so the first chunk starts inferring after just 1 segment.
+
   interface PreparedChunk {
     originalIndex: number;
     type: "text" | "silence";
@@ -583,29 +679,60 @@ async function generateVoice(
   }
 
   const preparedChunks: PreparedChunk[] = [];
-  for (let i = 0; i < chunks.length; i++) {
-    const chunk = chunks[i];
+  let preprocessDone = false;
+  let totalChunks = 0; // updated as we discover chunks
 
-    if (chunk.type === "silence") {
-      const silenceLength = Math.floor(chunk.durationSeconds * SAMPLE_RATE);
-      preparedChunks.push({ originalIndex: i, type: "silence", silenceLength });
-    } else if (chunk.type === "text") {
-      const tokensLength = chunk.tokens?.length ?? 0;
-      if (tokensLength < 1) {
-        continue;
+  // Kick off streaming preprocess in the background
+  const preprocessPromise = (async () => {
+    const stream = preprocessTextStreaming(params.text, params.lang, tokensPerChunk);
+    for await (const chunk of stream) {
+      if (isCancelled()) break;
+
+      if (chunk.type === "silence") {
+        const silenceLength = Math.floor(chunk.durationSeconds * SAMPLE_RATE);
+        preparedChunks.push({
+          originalIndex: preparedChunks.length,
+          type: "silence",
+          silenceLength,
+        });
+      } else if (chunk.type === "text") {
+        const tokensLength = chunk.tokens?.length ?? 0;
+        if (tokensLength < 1) continue;
+        preparedChunks.push({
+          originalIndex: preparedChunks.length,
+          type: "text",
+          tokens: chunk.tokens,
+        });
       }
-      preparedChunks.push({ originalIndex: i, type: "text", tokens: chunk.tokens });
+      totalChunks = preparedChunks.length;
+
+      // Wake up the inference loop whenever a new chunk is available
+      wakeInference();
+    }
+    preprocessDone = true;
+    console.log(
+      `[Worker] preprocess (${requestId.slice(0, 8)}): ${preparedChunks.length} chunks in ${Date.now() - genStart}ms`
+    );
+    wakeInference();
+  })();
+
+  // Signaling mechanism to wake the inference loop when new chunks arrive
+  let wakeResolve: (() => void) | null = null;
+  function wakeInference() {
+    if (wakeResolve) {
+      wakeResolve();
+      wakeResolve = null;
     }
   }
-
-  const totalChunks = preparedChunks.length;
-  if (totalChunks === 0) {
-    throw new Error("No chunks to process");
+  function waitForChunks(): Promise<void> {
+    return new Promise((resolve) => {
+      wakeResolve = resolve;
+    });
   }
 
-  // Results array and tracking
-  const results: Float32Array[] = new Array(totalChunks);
-  const completed: boolean[] = new Array(totalChunks).fill(false);
+  // Results array (grows dynamically as totalChunks increases)
+  const results: Float32Array[] = [];
+  const completed: boolean[] = [];
   let nextToYield = 0;
   let nextToStart = 0;
   let completedCount = 0;
@@ -617,7 +744,6 @@ async function generateVoice(
   const processChunk = async (chunkIdx: number) => {
     const prepared = preparedChunks[chunkIdx];
 
-    // Bail before spending inference on a superseded/cancelled job.
     if (isCancelled()) {
       return { index: chunkIdx, waveform: new Float32Array(0) };
     }
@@ -650,8 +776,9 @@ async function generateVoice(
   // Yield consecutive completed chunks in order
   const yieldReadyChunks = () => {
     if (isCancelled()) return;
+    // Use the current known totalChunks for reporting; final value is set when preprocess finishes
+    const reportTotal = preprocessDone ? totalChunks : 0;
     while (nextToYield < totalChunks && completed[nextToYield]) {
-      // Send chunk ready via IPC for streaming playback
       const waveform = results[nextToYield];
       const wavBuffer = createWavBuffer(waveform, SAMPLE_RATE);
       const base64 = Buffer.from(wavBuffer).toString("base64");
@@ -661,7 +788,7 @@ async function generateVoice(
         type: "chunk",
         data: {
           chunkIndex: nextToYield,
-          totalChunks,
+          totalChunks: reportTotal || nextToYield + 1,
           base64,
           mimeType: "audio/wav",
         },
@@ -671,13 +798,18 @@ async function generateVoice(
     }
   };
 
-  // Fill look-ahead window
+  // Fill look-ahead window from available prepared chunks
   const fillLookAhead = () => {
-    // Stop scheduling new inference work once the client has gone away.
     if (isCancelled()) return;
-    while (inFlight.size < lookAhead && nextToStart < totalChunks) {
+    while (inFlight.size < lookAhead && nextToStart < preparedChunks.length) {
       const chunkIdx = nextToStart;
       nextToStart++;
+
+      // Ensure results arrays are large enough
+      while (results.length <= chunkIdx) {
+        results.push(new Float32Array(0));
+        completed.push(false);
+      }
 
       const promise = processChunk(chunkIdx);
       inFlight.set(chunkIdx, promise);
@@ -688,48 +820,50 @@ async function generateVoice(
         completedCount++;
         inFlight.delete(result.index);
 
-        // Report progress
         parentPort?.postMessage({
           requestId,
           type: "progress",
           data: {
             stage: "inference",
             completed: completedCount,
-            total: totalChunks,
-            percent: Math.round((completedCount / totalChunks) * 100),
+            total: totalChunks || completedCount,
+            percent: totalChunks ? Math.round((completedCount / totalChunks) * 100) : 0,
           },
         });
 
-        // Yield any chunks that are ready (in order)
         yieldReadyChunks();
-
-        // Fill look-ahead with more work
         fillLookAhead();
       });
     }
   };
 
-  // Start processing
+  // Main inference loop: consumes chunks as they're produced by the preprocessor
   fillLookAhead();
-
-  // Wait for all to complete
-  while (completedCount < totalChunks) {
-    // Check for shutdown
+  while (true) {
     if (isShuttingDown) {
       throw new Error("Aborted due to shutdown");
     }
-    // Superseded or client disconnected — stop waiting on remaining inference.
-    if (isCancelled()) {
-      break;
-    }
+    if (isCancelled()) break;
+
+    // Are we done? All chunks preprocessed and all completed
+    if (preprocessDone && completedCount >= totalChunks) break;
+
+    // Try to fill look-ahead (new chunks may have arrived from preprocessor)
+    fillLookAhead();
+
+    // Wait for either inference completion or new chunks from preprocessor
     if (inFlight.size > 0) {
-      await Promise.race(inFlight.values());
+      await Promise.race([...inFlight.values(), waitForChunks()]);
+    } else if (!preprocessDone) {
+      await waitForChunks();
     } else {
       break;
     }
   }
 
-  // If cancelled, bail before the (potentially large) concatenation + encoding.
+  // Wait for preprocess to fully finish (it should be done by now)
+  await preprocessPromise;
+
   if (isCancelled()) {
     return {
       buffer: createWavBuffer(new Float32Array(0), SAMPLE_RATE),
@@ -794,7 +928,34 @@ parentPort?.on("message", async (message) => {
     if (isShuttingDown) return;
     try {
       console.log("Preloading model:", data.model);
-      await getModel(data.model);
+      const modelBuffer = await getModel(data.model);
+
+      if (!cachedSession || cachedModelId !== data.model) {
+        const session = await ort.InferenceSession.create(Buffer.from(modelBuffer), {
+          executionProviders: ["cpu"],
+          graphOptimizationLevel: "all",
+          enableCpuMemArena: true,
+        });
+        cachedSession = session;
+        cachedModelId = data.model;
+
+        // Run a realistic-size dummy inference to warm up ONNX internal allocators.
+        // Uses a full-context-window token sequence so that all internal buffers
+        // are allocated at their max size — subsequent inferences hit no new allocs.
+        const warmupLen = MODEL_CONTEXT_WINDOW;
+        const dummyTokens = [0, ...Array(warmupLen - 2).fill(16), 0];
+        const input_ids = new ort.Tensor("int64", BigInt64Array.from(dummyTokens.map(BigInt)), [
+          1,
+          warmupLen,
+        ]);
+        const voices = await getShapedVoiceFile("af_heart");
+        const ref_s = voices[Math.min(warmupLen - 3, voices.length - 1)][0];
+        const style = new ort.Tensor("float32", new Float32Array(ref_s), [1, ref_s.length]);
+        const speed = new ort.Tensor("float32", [1], [1]);
+        await session.run({ input_ids, style, speed });
+        console.log("Model session warmed up");
+      }
+
       console.log("Model preloaded successfully");
     } catch (error) {
       console.error("Failed to preload model:", error);
