@@ -32,7 +32,7 @@ jobs:
         run: bun run fmt:check
 
       - name: Unit tests
-        run: bun test
+        run: bun run test
 
       - name: Typecheck server
         run: bun run server:compile
