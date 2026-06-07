@@ -1,6 +1,6 @@
 # /fix-checks — Auto-fix failing CI checks
 
-When invoked, poll the current branch's GitHub Actions checks, identify auto-fixable failures, apply fixes, and push.
+When invoked, continuously poll the current branch's GitHub Actions checks, fix failures as they appear, and push — looping until all checks pass or no more auto-fixes are possible.
 
 ## Steps
 
@@ -11,32 +11,51 @@ When invoked, poll the current branch's GitHub Actions checks, identify auto-fix
    gh pr view --json number,headRefName,statusCheckRollup
    ```
 
-2. **Find failing checks**
-   Look at `statusCheckRollup` for checks with `conclusion: FAILURE` or `status: IN_PROGRESS`.
-   Wait for in-progress checks to complete before acting (poll every 15s, up to 3 minutes).
+   Abort if on `main`.
+
+2. **Poll loop** — repeat until all checks pass or nothing left to fix:
+
+   a. Fetch check status:
+
+   ```
+   gh pr view --json statusCheckRollup --jq '.statusCheckRollup[] | {name,conclusion,status}'
+   ```
+
+   b. If any checks are `IN_PROGRESS`, wait 15s and re-poll (up to 10 minutes total).
+
+   c. Collect all checks with `conclusion: FAILURE`.
 
 3. **Map failures to fix commands**
-   | Check name contains | Fix command |
-   |---|---|
-   | `fmt`, `format`, `prettier` | `npm run fmt` |
-   | `lint` | `npm run lint:fix` |
 
-   Only proceed with checks that have a known fix. Report unknown failures to the user without attempting a fix.
+   | Check name contains         | Fix command        |
+   | --------------------------- | ------------------ |
+   | `fmt`, `format`, `prettier` | `bun run fmt`      |
+   | `lint`                      | `bun run lint:fix` |
 
-4. **Apply fixes**
-   Run each applicable fix command. Then:
+   Skip checks with no known fix — report them to the user at the end.
+
+4. **Apply fixes and push**
+
+   Run each applicable fix command, then:
 
    ```
-   git diff --quiet && echo "nothing to fix" && exit 0
-   git add -A
-   git commit -m "chore: auto-fix CI checks"
-   git push
+   git diff --quiet && echo "nothing changed" || (git add -A && git commit -m "chore: auto-fix CI checks" && git push)
    ```
 
-5. **Report**
-   Tell the user which checks were fixed and pushed, and which (if any) still need manual attention.
+   After pushing, go back to step 2 and continue polling the new run.
+
+5. **Exit conditions**
+
+   - All checks pass → report success.
+   - No failing checks have a known fix → report the remaining failures and stop.
+   - Same fix was already attempted twice with no change → stop to avoid a loop.
+
+6. **Report**
+
+   Tell the user which checks were auto-fixed across how many iterations, and which (if any) still need manual attention.
 
 ## Notes
 
-- Never fix on `main` branch — warn the user and stop.
-- If `gh pr view` fails (no open PR), run fix commands locally and report results without pushing.
+- Never fix on `main` branch — warn and stop.
+- If `gh pr view` fails (no open PR), run fix commands locally and report without pushing.
+- Use `bun run <script>` not `npm run` — this project uses Bun.

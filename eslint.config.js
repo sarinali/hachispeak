@@ -7,6 +7,7 @@ export default [
   {
     ignores: [
       "node_modules/**",
+      ".claude/**",
       "build/**",
       "dist/**",
       "releases/**",
@@ -14,7 +15,6 @@ export default [
       "server/**/*.js.map",
       "clients/chrome/lib/**",
       "clients/chrome/dist/**",
-      "**/package-lock.json",
     ],
   },
 
