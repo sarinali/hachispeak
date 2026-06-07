@@ -10,6 +10,22 @@ import ffmpegPath from "ffmpeg-static";
 // @ts-ignore
 import ESpeakNg from "espeak-ng";
 import { createWavBuffer, modifyWavSpeed, wavToMp3 } from "./shared-audio.js";
+// Singleton espeak-ng WASM instance. Initialized once with noInitialRun so the
+// expensive WASM startup (memory allocation, embedded FS population, language
+// data loading) only pays once. Subsequent phonemize calls use callMain directly.
+let espeakModule = null;
+let espeakModulePromise = null;
+async function getEspeakModule() {
+    if (espeakModule)
+        return espeakModule;
+    if (!espeakModulePromise) {
+        espeakModulePromise = ESpeakNg({ noInitialRun: true }).then((inst) => {
+            espeakModule = inst;
+            return inst;
+        });
+    }
+    return espeakModulePromise;
+}
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 // Resolve a path that may live inside app.asar to its real on-disk location
@@ -61,6 +77,7 @@ console.log("[TTS Worker] MODELS_DIR:", MODELS_DIR);
 // Keep ONNX session alive between requests for performance
 let cachedSession = null;
 let cachedModelId = null;
+let cachedAcceleration = null;
 // Current request ID for progress messages
 let currentRequestId = null;
 // Requests cancelled by the main process (client disconnected mid-stream). The
@@ -328,10 +345,8 @@ function normalizeText(text) {
 async function phonemize(text, langId) {
     const lang = langsMap[langId] || "en-us";
     text = normalizeText(text);
-    const espeakArgs = ["--phonout", "generated", "-q", "--ipa", "-v", lang, text];
-    const espeak = await ESpeakNg({
-        arguments: espeakArgs,
-    });
+    const espeak = await getEspeakModule();
+    espeak.callMain(["--phonout", "generated", "-q", "--ipa", "-v", lang, text]);
     const generated = espeak.FS.readFile("generated", { encoding: "utf8" });
     return generated.split("\n").join(" ").trim();
 }
@@ -344,8 +359,8 @@ async function phonemizeBatch(texts, langId) {
         return [await phonemize(texts[0], langId)];
     const lang = langsMap[langId] || "en-us";
     const joined = texts.map((t) => normalizeText(t)).join(BATCH_SEPARATOR);
-    const espeakArgs = ["--phonout", "generated", "-q", "--ipa", "-v", lang, joined];
-    const espeak = await ESpeakNg({ arguments: espeakArgs });
+    const espeak = await getEspeakModule();
+    espeak.callMain(["--phonout", "generated", "-q", "--ipa", "-v", lang, joined]);
     const generated = espeak.FS.readFile("generated", { encoding: "utf8" });
     const fullPhonemes = generated.split("\n").join(" ").trim();
     const parts = fullPhonemes.split(BATCH_SEPARATOR_PHONEME);
@@ -541,12 +556,11 @@ async function generateVoice(params, requestId) {
     const genStart = Date.now();
     // Get or create ONNX session (do this first so it's ready when chunks arrive)
     let session;
-    if (cachedSession && cachedModelId === params.model) {
+    if (cachedSession && cachedModelId === params.model && cachedAcceleration === params.acceleration) {
         session = cachedSession;
     }
     else {
         const modelBuffer = await getModel(params.model);
-        // Configure execution providers for GPU acceleration
         const executionProviders = [];
         if (params.acceleration === "coreml") {
             executionProviders.push("coreml");
@@ -559,6 +573,7 @@ async function generateVoice(params, requestId) {
         });
         cachedSession = session;
         cachedModelId = params.model;
+        cachedAcceleration = params.acceleration;
     }
     const voices = parseVoiceFormula(params.voiceFormula);
     const combinedVoice = await combineVoices(voices);
@@ -784,14 +799,22 @@ parentPort?.on("message", async (message) => {
         try {
             console.log("Preloading model:", data.model);
             const modelBuffer = await getModel(data.model);
-            if (!cachedSession || cachedModelId !== data.model) {
+            const preloadAcceleration = data.acceleration || "cpu";
+            if (!cachedSession || cachedModelId !== data.model || cachedAcceleration !== preloadAcceleration) {
+                const preloadProviders = [];
+                if (preloadAcceleration === "coreml") {
+                    preloadProviders.push("coreml");
+                }
+                preloadProviders.push("cpu");
+                console.log("Preloading model with providers:", preloadProviders);
                 const session = await ort.InferenceSession.create(Buffer.from(modelBuffer), {
-                    executionProviders: ["cpu"],
+                    executionProviders: preloadProviders,
                     graphOptimizationLevel: "all",
                     enableCpuMemArena: true,
                 });
                 cachedSession = session;
                 cachedModelId = data.model;
+                cachedAcceleration = preloadAcceleration;
                 // Run a realistic-size dummy inference to warm up ONNX internal allocators.
                 // Uses a full-context-window token sequence so that all internal buffers
                 // are allocated at their max size — subsequent inferences hit no new allocs.
@@ -812,6 +835,15 @@ parentPort?.on("message", async (message) => {
         }
         catch (error) {
             console.error("Failed to preload model:", error);
+        }
+        // Pre-warm espeak-ng WASM in parallel with model load so the singleton is
+        // ready before the first real request arrives.
+        try {
+            await getEspeakModule();
+            console.log("espeak-ng preloaded successfully");
+        }
+        catch (error) {
+            console.error("Failed to preload espeak-ng:", error);
         }
         return;
     }
