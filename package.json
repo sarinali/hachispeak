@@ -11,8 +11,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22",
-    "npm": ">=10"
+    "bun": ">=1"
   },
   "scripts": {
     "fmt": "prettier . --write",
@@ -20,14 +19,14 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "test": "vitest run --passWithNoTests",
-    "check": "npm run lint && npm run fmt:check && npm run server:compile",
+    "check": "bun run lint && bun run fmt:check && bun run server:compile",
     "prepare": "husky",
-    "server:install": "cd server && npm install",
-    "server:compile": "cd server && npm run compile",
-    "server:start": "cd server && npm start",
+    "server:install": "cd server && bun install",
+    "server:compile": "cd server && bun run compile",
+    "server:start": "cd server && bun start",
     "extension:chrome:pack": "mkdir -p releases && cd clients/chrome && zip -r ../../releases/out-loud-chrome.zip . -x '*.DS_Store'",
     "extension:test": "curl -s http://127.0.0.1:51730/api/v1/audio/voices | head -c 200",
-    "bench": "node scripts/bench-streaming.mjs"
+    "bench": "bun scripts/bench-streaming.mjs"
   },
   "devDependencies": {
     "@eslint/js": "9.39.4",

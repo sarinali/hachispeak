@@ -12,12 +12,14 @@ chrome-extension/dist/
 # Compiled TypeScript
 electron/**/*.js
 electron/**/*.js.map
+server/**/*.js
+server/**/*.js.map
 
 # Vendored libraries
 chrome-extension/lib/
 
 # Lockfiles
-package-lock.json
+bun.lock
 
 # Logs
 *.log

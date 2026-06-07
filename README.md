@@ -5,20 +5,19 @@ Free, open-source, 100% offline AI text-to-speech. Runs a local HTTP server on p
 ## Structure
 
 ```
-server/       Local TTS HTTP server (Node.js + ONNX)
+server/       Local TTS HTTP server (Bun + ONNX)
 clients/
   chrome/     Chrome extension
 ```
 
 ## Running the server
 
-Requires Node.js >= 22.
+Requires [Bun](https://bun.sh) >= 1.
 
 ```bash
-cd server
-npm install
-npm run compile
-npm start
+bun run server:install
+bun run server:compile
+bun run server:start
 ```
 
 The server starts on `http://127.0.0.1:51730`.
