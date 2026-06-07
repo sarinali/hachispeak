@@ -1,44 +1,34 @@
-// Flat config — ESLint v9+
-// Per-area configs: root Electron/scripts, electron-ui (React), chrome-extension (browser JS)
-
 import js from "@eslint/js";
 import tseslint from "typescript-eslint";
-import reactPlugin from "eslint-plugin-react";
-import reactHooks from "eslint-plugin-react-hooks";
 import prettier from "eslint-config-prettier";
 import globals from "globals";
 
 export default [
-  // Ignored paths (global)
   {
     ignores: [
       "node_modules/**",
       "build/**",
       "dist/**",
       "releases/**",
-      "electron/**/*.js",
-      "electron/**/*.js.map",
-      "electron-ui/dist/**",
-      "tray-app/dist/**",
-      "chrome-extension/lib/**",
-      "chrome-extension/dist/**",
-      "safari-extension/**",
+      "server/**/*.js",
+      "server/**/*.js.map",
+      "clients/chrome/lib/**",
+      "clients/chrome/dist/**",
       "**/package-lock.json",
     ],
   },
 
-  // Recommended JS rules everywhere
   js.configs.recommended,
 
-  // TypeScript (electron/ and electron-ui/)
+  // TypeScript (server/)
   ...tseslint.configs.recommended.map((cfg) => ({
     ...cfg,
-    files: ["electron/**/*.ts", "electron-ui/**/*.{ts,tsx}"],
+    files: ["server/**/*.ts"],
   })),
 
-  // Electron main-process TS (Node runtime)
+  // Server source (Node runtime)
   {
-    files: ["electron/**/*.ts"],
+    files: ["server/**/*.ts"],
     languageOptions: {
       globals: { ...globals.node },
       parserOptions: { sourceType: "module", ecmaVersion: 2022 },
@@ -52,70 +42,20 @@ export default [
       ],
       "@typescript-eslint/no-unused-vars": [
         "warn",
-        {
-          argsIgnorePattern: "^_",
-          varsIgnorePattern: "^_",
-          caughtErrors: "none",
-        },
+        { argsIgnorePattern: "^_", varsIgnorePattern: "^_", caughtErrors: "none" },
       ],
     },
   },
 
-  // Preload script (CommonJS)
+  // Chrome extension — browser JS loaded via <script src>, cross-file globals
   {
-    files: ["electron/preload.cjs"],
+    files: ["clients/chrome/**/*.js"],
+    ignores: ["clients/chrome/lib/**"],
     languageOptions: {
-      globals: { ...globals.node },
-      parserOptions: { sourceType: "commonjs", ecmaVersion: 2022 },
-    },
-  },
-
-  // Electron UI (React + TS in a browser-ish renderer)
-  {
-    files: ["electron-ui/**/*.{ts,tsx}"],
-    plugins: { react: reactPlugin, "react-hooks": reactHooks },
-    languageOptions: {
-      globals: { ...globals.browser },
-      parserOptions: {
-        ecmaFeatures: { jsx: true },
-        ecmaVersion: 2022,
-        sourceType: "module",
-      },
-    },
-    settings: { react: { version: "detect" } },
-    rules: {
-      "react/react-in-jsx-scope": "off",
-      "react/prop-types": "off",
-      "react-hooks/rules-of-hooks": "error",
-      "react-hooks/exhaustive-deps": "warn",
-      "@typescript-eslint/no-explicit-any": "off",
-      "@typescript-eslint/no-unused-vars": [
-        "warn",
-        {
-          argsIgnorePattern: "^_",
-          varsIgnorePattern: "^_",
-          caughtErrors: "none",
-        },
-      ],
-    },
-  },
-
-  // Chrome extension (plain browser JS, globals-style scripts loaded via <script src>)
-  // Each script defines globals consumed by sibling scripts; disable no-undef here.
-  {
-    files: ["chrome-extension/**/*.js"],
-    languageOptions: {
-      globals: {
-        ...globals.browser,
-        ...globals.webextensions,
-        chrome: "readonly",
-      },
+      globals: { ...globals.browser, ...globals.webextensions, chrome: "readonly" },
       parserOptions: { sourceType: "script", ecmaVersion: 2022 },
     },
     rules: {
-      // Chrome extension scripts are loaded via <script src> tags and define
-      // globals that sibling scripts consume. ESLint can't see those cross-file
-      // references, so both no-undef and no-unused-vars are disabled here.
       "no-undef": "off",
       "no-unused-vars": "off",
       "no-empty": ["warn", { allowEmptyCatch: true }],
@@ -124,7 +64,7 @@ export default [
 
   // Chrome extension native host (Node CommonJS)
   {
-    files: ["chrome-extension/native-host/**/*.cjs"],
+    files: ["clients/chrome/native-host/**/*.cjs"],
     languageOptions: {
       globals: { ...globals.node },
       parserOptions: { sourceType: "commonjs", ecmaVersion: 2022 },
@@ -133,7 +73,7 @@ export default [
 
   // Chrome extension build script (Node)
   {
-    files: ["chrome-extension/build.js"],
+    files: ["clients/chrome/build.js"],
     languageOptions: {
       globals: { ...globals.node },
       parserOptions: { sourceType: "module", ecmaVersion: 2022 },
@@ -149,15 +89,5 @@ export default [
     },
   },
 
-  // Tray app (Node + Electron)
-  {
-    files: ["tray-app/**/*.js"],
-    languageOptions: {
-      globals: { ...globals.node },
-      parserOptions: { sourceType: "commonjs", ecmaVersion: 2022 },
-    },
-  },
-
-  // Turn off formatting rules that conflict with Prettier
   prettier,
 ];
