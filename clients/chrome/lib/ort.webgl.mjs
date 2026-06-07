@@ -8195,15 +8195,7 @@ var require_float = __commonJS({
             var sign = val < 0 ? 1 : 0;
             if (sign) val = -val;
             if (val === 0)
-              writeUint(
-                1 / val > 0
-                  ? /* positive */
-                    0
-                  : /* negative 0 */
-                    2147483648,
-                buf,
-                pos
-              );
+              writeUint(1 / val > 0 ? /* positive */ 0 : /* negative 0 */ 2147483648, buf, pos);
             else if (isNaN(val)) writeUint(2143289344, buf, pos);
             else if (val > 34028234663852886e22)
               writeUint(((sign << 31) | 2139095040) >>> 0, buf, pos);
@@ -8295,11 +8287,7 @@ var require_float = __commonJS({
             if (val === 0) {
               writeUint(0, buf, pos + off0);
               writeUint(
-                1 / val > 0
-                  ? /* positive */
-                    0
-                  : /* negative 0 */
-                    2147483648,
+                1 / val > 0 ? /* positive */ 0 : /* negative 0 */ 2147483648,
                 buf,
                 pos + off1
               );
@@ -8642,14 +8630,8 @@ var require_minimal = __commonJS({
       (typeof window !== "undefined" && window) ||
       (typeof self !== "undefined" && self) ||
       exports2;
-    util.emptyArray = Object.freeze
-      ? Object.freeze([])
-      : /* istanbul ignore next */
-        [];
-    util.emptyObject = Object.freeze
-      ? Object.freeze({})
-      : /* istanbul ignore next */
-        {};
+    util.emptyArray = Object.freeze ? Object.freeze([]) : /* istanbul ignore next */ [];
+    util.emptyObject = Object.freeze ? Object.freeze({}) : /* istanbul ignore next */ {};
     util.isInteger =
       Number.isInteger /* istanbul ignore next */ ||
       function isInteger(value) {
@@ -8680,10 +8662,7 @@ var require_minimal = __commonJS({
     util.Buffer = (function () {
       try {
         var Buffer2 = util.inquire("buffer").Buffer;
-        return Buffer2.prototype.utf8Write
-          ? Buffer2
-          : /* istanbul ignore next */
-            null;
+        return Buffer2.prototype.utf8Write ? Buffer2 : /* istanbul ignore next */ null;
       } catch (e) {
         return null;
       }
@@ -9263,10 +9242,7 @@ var require_reader = __commonJS({
       BufferReader = BufferReader_;
       Reader.create = create();
       BufferReader._configure();
-      var fn = util.Long
-        ? "toLong"
-        : /* istanbul ignore next */
-          "toNumber";
+      var fn = util.Long ? "toLong" : /* istanbul ignore next */ "toNumber";
       util.merge(Reader.prototype, {
         int64: function read_int64() {
           return readLongVarint.call(this)[fn](false);
