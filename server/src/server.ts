@@ -12,6 +12,10 @@ let httpServer: http.Server | null = null;
 
 const EXTENSION_API_PORT = 51730;
 
+// CoreML EP only supports ~36/3940 Kokoro nodes and fails at runtime.
+// Keep the env var hook for future native CoreML model exports.
+const ACCELERATION: "cpu" | "coreml" = (process.env.TTS_ACCELERATION as "cpu" | "coreml") || "cpu";
+
 // Keep track of pending TTS requests
 const pendingRequests = new Map<
   string,
@@ -106,6 +110,17 @@ function createTTSWorker() {
 
   ttsWorker.on("exit", (code) => {
     console.error("[Worker] Exited with code:", code);
+    // Reject all pending requests so callers don't hang forever.
+    for (const [id, pending] of pendingRequests) {
+      pending.reject(new Error("TTS worker crashed and restarted"));
+      pendingRequests.delete(id);
+    }
+    workerBusy = Promise.resolve();
+    if (!isShuttingDown) {
+      console.log("[Worker] Restarting...");
+      createTTSWorker();
+      preloadModel();
+    }
   });
 }
 
@@ -114,7 +129,7 @@ async function preloadModel() {
     console.log("[Main] Requesting model preload...");
     ttsWorker.postMessage({
       type: "preload",
-      data: { model: "model_q8f16" },
+      data: { model: "model_q8f16", acceleration: ACCELERATION },
     });
   }
 }
@@ -267,6 +282,19 @@ function createExtensionServer() {
       return;
     }
 
+    // GET /api/v1/info
+    if (req.method === "GET" && url.pathname === "/api/v1/info") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          acceleration: ACCELERATION,
+          platform: process.platform,
+          arch: process.arch,
+        })
+      );
+      return;
+    }
+
     // GET /api/v1/audio/voices
     if (req.method === "GET" && url.pathname === "/api/v1/audio/voices") {
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -317,7 +345,7 @@ function createExtensionServer() {
               model: "model_q8f16",
               speed: speed || 1,
               format: "wav",
-              acceleration: "cpu",
+              acceleration: ACCELERATION,
               streaming: true,
             },
             (msg) => {
@@ -384,7 +412,7 @@ function createExtensionServer() {
               model: "model_q8f16",
               speed: speed || 1,
               format: response_format === "mp3" ? "mp3" : "wav",
-              acceleration: "cpu",
+              acceleration: ACCELERATION,
               streaming: true,
             },
             (msg) => {
@@ -429,6 +457,8 @@ function createExtensionServer() {
 }
 
 // ============ Process Lifecycle ============
+
+const isShuttingDown = false;
 
 function shutdown() {
   console.log("[Server] Shutting down...");

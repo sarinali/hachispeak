@@ -83,6 +83,7 @@ console.log("[TTS Worker] MODELS_DIR:", MODELS_DIR);
 // Keep ONNX session alive between requests for performance
 let cachedSession: ort.InferenceSession | null = null;
 let cachedModelId: string | null = null;
+let cachedAcceleration: string | null = null;
 
 // Current request ID for progress messages
 let currentRequestId: string | null = null;
@@ -653,14 +654,16 @@ async function generateVoice(
 
   // Get or create ONNX session (do this first so it's ready when chunks arrive)
   let session: ort.InferenceSession;
-  if (cachedSession && cachedModelId === params.model) {
+  if (
+    cachedSession &&
+    cachedModelId === params.model &&
+    cachedAcceleration === params.acceleration
+  ) {
     session = cachedSession;
   } else {
     const modelBuffer = await getModel(params.model);
 
-    // Configure execution providers for GPU acceleration
     const executionProviders: ort.InferenceSession.ExecutionProviderConfig[] = [];
-
     if (params.acceleration === "coreml") {
       executionProviders.push("coreml");
     }
@@ -674,6 +677,7 @@ async function generateVoice(
 
     cachedSession = session;
     cachedModelId = params.model;
+    cachedAcceleration = params.acceleration;
   }
 
   const voices = parseVoiceFormula(params.voiceFormula);
@@ -945,14 +949,26 @@ parentPort?.on("message", async (message) => {
       console.log("Preloading model:", data.model);
       const modelBuffer = await getModel(data.model);
 
-      if (!cachedSession || cachedModelId !== data.model) {
+      const preloadAcceleration: string = data.acceleration || "cpu";
+      if (
+        !cachedSession ||
+        cachedModelId !== data.model ||
+        cachedAcceleration !== preloadAcceleration
+      ) {
+        const preloadProviders: ort.InferenceSession.ExecutionProviderConfig[] = [];
+        if (preloadAcceleration === "coreml") {
+          preloadProviders.push("coreml");
+        }
+        preloadProviders.push("cpu");
+        console.log("Preloading model with providers:", preloadProviders);
         const session = await ort.InferenceSession.create(Buffer.from(modelBuffer), {
-          executionProviders: ["cpu"],
+          executionProviders: preloadProviders,
           graphOptimizationLevel: "all",
           enableCpuMemArena: true,
         });
         cachedSession = session;
         cachedModelId = data.model;
+        cachedAcceleration = preloadAcceleration;
 
         // Run a realistic-size dummy inference to warm up ONNX internal allocators.
         // Uses a full-context-window token sequence so that all internal buffers
