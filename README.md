@@ -1,8 +1,10 @@
-# Out Loud
+# hachispeak
 
 hachispeak! forked from https://github.com/light-cloud-com/out-loud, modified to have a central clients folder for diverse client support + coreml with koroko for native performance on macOS.
 
-named hachispeak after hachiware, the only character in chiikawa and friends that can speak : )
+named hachispeak after hachiware
+
+<img width="360" height="360" alt="image" src="https://github.com/user-attachments/assets/168479b2-d300-41af-8af2-8b0ccf5c51aa" />
 
 Free, open-source, 100% offline AI text-to-speech. Runs a local HTTP server on port `51730` powered by [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M). Nothing leaves your machine.
 
