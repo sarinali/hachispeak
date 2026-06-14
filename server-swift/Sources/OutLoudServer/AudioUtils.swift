@@ -64,4 +64,23 @@ enum AudioUtils {
         if !tail.isEmpty { sentences.append(tail) }
         return sentences.filter { !$0.isEmpty }
     }
+
+    /// Split a sentence into word-count sub-chunks that fit within the model's 5-second
+    /// output window (kokoro_5s produces at most 120,000 samples). At average speaking
+    /// rate (~2.5 words/sec), 10 words ≈ 4 seconds — safely under the 5-second cap.
+    static func splitForSynthesis(_ text: String, maxWords: Int = 10) -> [String] {
+        let words = text.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        guard words.count > maxWords else { return [text] }
+        var chunks: [String] = []
+        var current: [String] = []
+        for word in words {
+            current.append(word)
+            if current.count >= maxWords {
+                chunks.append(current.joined(separator: " "))
+                current = []
+            }
+        }
+        if !current.isEmpty { chunks.append(current.joined(separator: " ")) }
+        return chunks.isEmpty ? [text] : chunks
+    }
 }
