@@ -5,7 +5,6 @@ const OPTIONS_DEFAULTS = {
   serverUrl: SERVER_URL,
   apiKey: "",
   voice: DEFAULT_VOICE,
-  language: DEFAULT_LANGUAGE,
   speed: 1.0,
   format: "wav",
   autoPlay: false,
@@ -15,7 +14,6 @@ const OPTIONS_DEFAULTS = {
 const form = document.getElementById("settings-form");
 const serverUrlInput = document.getElementById("server-url");
 const apiKeyInput = document.getElementById("api-key");
-const languageSelect = document.getElementById("default-language");
 const voiceSelect = document.getElementById("default-voice");
 const speedSlider = document.getElementById("default-speed");
 const speedDisplay = document.getElementById("speed-display");
@@ -51,43 +49,28 @@ async function loadSettings() {
 function applySettingsToForm() {
   serverUrlInput.value = settings.serverUrl;
   apiKeyInput.value = settings.apiKey;
-  languageSelect.value = settings.language;
-  updateVoiceOptions();
-  voiceSelect.value = settings.voice;
+  populateVoiceOptions();
   speedSlider.value = settings.speed;
   speedDisplay.textContent = settings.speed.toFixed(1);
   formatSelect.value = settings.format;
   autoPlayCheckbox.checked = settings.autoPlay;
 }
 
-// Update voice options based on language
-function updateVoiceOptions() {
-  const lang = languageSelect.value;
-  const voices = VOICES[lang] || VOICES["en-us"];
-
+function populateVoiceOptions() {
   voiceSelect.innerHTML = "";
-  voices.forEach((voice) => {
+  VOICE_OPTIONS.forEach((voice) => {
     const option = document.createElement("option");
     option.value = voice.id;
     option.textContent = `${voice.name} (${voice.gender})`;
     voiceSelect.appendChild(option);
   });
-
-  // Select saved voice or first available
-  const savedVoice = voices.find((v) => v.id === settings.voice);
-  if (savedVoice) {
-    voiceSelect.value = settings.voice;
-  } else {
-    voiceSelect.value = voices[0].id;
-  }
+  const saved = VOICE_OPTIONS.find((v) => v.id === settings.voice);
+  voiceSelect.value = saved ? settings.voice : VOICE_OPTIONS[0].id;
 }
 
 // Setup event listeners
 function setupEventListeners() {
   form.addEventListener("submit", handleSave);
-  languageSelect.addEventListener("change", () => {
-    updateVoiceOptions();
-  });
   speedSlider.addEventListener("input", () => {
     speedDisplay.textContent = parseFloat(speedSlider.value).toFixed(1);
   });
@@ -102,7 +85,6 @@ async function handleSave(e) {
   settings = {
     serverUrl: serverUrlInput.value.trim() || OPTIONS_DEFAULTS.serverUrl,
     apiKey: apiKeyInput.value.trim(),
-    language: languageSelect.value,
     voice: voiceSelect.value,
     speed: parseFloat(speedSlider.value),
     format: formatSelect.value,
