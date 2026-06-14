@@ -94,7 +94,6 @@ async function play(ui, textArg) {
 
   playStartedAt = performance.now();
   currentText = text;
-  ui.textEl.value = text;
   ui.playBtn.disabled = false;
 
   const canUseCache =

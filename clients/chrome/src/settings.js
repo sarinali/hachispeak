@@ -11,10 +11,8 @@ async function loadSettings() {
     if (serverSettings) {
       settings = {
         ...settings,
-        language: serverSettings.language || settings.language,
         voice: serverSettings.voice || settings.voice,
         volume: serverSettings.volume ?? settings.volume,
-        highlightChunk: serverSettings.highlightChunk ?? settings.highlightChunk,
         text: serverSettings.text || settings.text,
       };
     }
@@ -28,17 +26,16 @@ async function saveSettings() {
   } catch (e) {}
 }
 
-function updateVoiceOptions(languageSelect, voiceSelect) {
-  const voices = VOICES[languageSelect.value] || VOICES["en-us"];
+function populateVoices(voiceSelect) {
   voiceSelect.innerHTML = "";
-  voices.forEach((v) => {
+  VOICE_OPTIONS.forEach((v) => {
     const opt = document.createElement("option");
     opt.value = v.id;
     opt.textContent = `${v.name} (${v.gender})`;
     voiceSelect.appendChild(opt);
   });
-  if (!voices.find((v) => v.id === settings.voice)) {
-    settings.voice = voices[0].id;
+  if (!VOICE_OPTIONS.find((v) => v.id === settings.voice)) {
+    settings.voice = VOICE_OPTIONS[0].id;
   }
   voiceSelect.value = settings.voice;
 }
