@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Out Loud - Text to Speech",
+  "name": "hachispeak - Text to Speech",
   "version": "1.0.0",
   "description": "Read selected text aloud using AI Text-to-Speech",
   "permissions": ["activeTab", "scripting", "storage", "sidePanel", "contextMenus"],
