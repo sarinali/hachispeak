@@ -1,5 +1,4 @@
 import js from "@eslint/js";
-import tseslint from "typescript-eslint";
 import prettier from "eslint-config-prettier";
 import globals from "globals";
 
@@ -11,41 +10,13 @@ export default [
       "build/**",
       "dist/**",
       "releases/**",
-      "server/**/*.js",
-      "server/**/*.js.map",
+      "server-swift/**",
       "clients/chrome/lib/**",
       "clients/chrome/dist/**",
     ],
   },
 
   js.configs.recommended,
-
-  // TypeScript (server/)
-  ...tseslint.configs.recommended.map((cfg) => ({
-    ...cfg,
-    files: ["server/**/*.ts"],
-  })),
-
-  // Server source (Node runtime)
-  {
-    files: ["server/**/*.ts"],
-    languageOptions: {
-      globals: { ...globals.node },
-      parserOptions: { sourceType: "module", ecmaVersion: 2022 },
-    },
-    rules: {
-      "@typescript-eslint/no-explicit-any": "off",
-      "@typescript-eslint/no-require-imports": "off",
-      "@typescript-eslint/ban-ts-comment": [
-        "warn",
-        { "ts-ignore": "allow-with-description", minimumDescriptionLength: 0 },
-      ],
-      "@typescript-eslint/no-unused-vars": [
-        "warn",
-        { argsIgnorePattern: "^_", varsIgnorePattern: "^_", caughtErrors: "none" },
-      ],
-    },
-  },
 
   // Chrome extension — browser JS loaded via <script src>, cross-file globals
   {
