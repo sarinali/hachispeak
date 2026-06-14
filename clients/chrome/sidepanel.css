@@ -52,105 +52,7 @@ body {
   letter-spacing: 0.05em;
 }
 
-/* Text Section */
-.text-section {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.text-input-wrapper {
-  position: relative;
-  flex: 1;
-  display: flex;
-  min-height: 100px;
-}
-
-/* Text Input */
-.text-input {
-  width: 100%;
-  flex: 1;
-  min-height: 100px;
-  background: rgba(31, 41, 55, 0.5);
-  border: 1px solid rgba(55, 65, 81, 0.5);
-  border-radius: 6px;
-  padding: 12px 14px;
-  font-size: 16px;
-  line-height: 1.6;
-  color: #f3f4f6;
-  font-family: inherit;
-  resize: none;
-  transition: all 0.2s;
-}
-
-.text-input.highlighting {
-  color: transparent;
-  caret-color: #f3f4f6;
-}
-
-/* Highlight Overlay */
-.text-highlight-overlay {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  padding: 12px 14px;
-  font-size: 16px;
-  line-height: 1.6;
-  font-family: inherit;
-  pointer-events: none;
-  overflow: auto;
-  border-radius: 6px;
-  white-space: pre-wrap;
-  word-wrap: break-word;
-}
-
-.text-highlight-overlay .chunk {
-  color: #9ca3af;
-}
-
-.text-highlight-overlay .chunk.active {
-  background: rgba(99, 102, 241, 0.9);
-  color: #fff;
-  border-radius: 2px;
-  box-decoration-break: clone;
-  -webkit-box-decoration-break: clone;
-}
-
-.text-input:hover:not(.highlighting) {
-  border-color: #4b5563;
-  background: rgba(31, 41, 55, 0.7);
-}
-
-.text-input:focus:not(.highlighting) {
-  outline: none;
-  /*border-color: rgba(99, 102, 241, 0.7);*/
-  /*box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);*/
-  /*background: rgba(31, 41, 55, 0.8);*/
-}
-
-.text-input:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.text-input::placeholder {
-  color: #6b7280;
-}
-
-.text-input.highlighting {
-  border-color: rgba(99, 102, 241, 0.5);
-}
-
 /* Controls */
-.controls-section {
-  display: flex;
-  gap: 12px;
-  flex-shrink: 0;
-}
-
 .control-group {
   flex-shrink: 0;
 }
@@ -420,35 +322,6 @@ select option {
   margin-top: 12px;
   font-size: 11px;
   color: #6b7280;
-}
-
-/* Footer */
-.footer {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  padding-top: 8px;
-  flex-shrink: 0;
-}
-
-.footer-brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: #4b5563;
-  font-size: 11px;
-  text-decoration: none;
-  cursor: pointer;
-  transition: color 0.2s;
-}
-
-.footer-brand:hover {
-  color: #9ca3af;
-}
-
-.footer-logo {
-  height: 20px;
-  width: auto;
 }
 
 /* Volume Slider */

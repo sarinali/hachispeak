@@ -14,39 +14,10 @@
         <span>Out Loud</span>
       </div>
 
-      <!-- Text Input -->
-      <div class="text-section">
-        <div class="text-input-wrapper">
-          <textarea
-            id="selected-text"
-            class="text-input"
-            placeholder="Select text on the page or type here..."
-          ></textarea>
-          <div id="text-highlight-overlay" class="text-highlight-overlay hidden"></div>
-        </div>
-      </div>
-
-      <!-- Language & Voice -->
-      <div class="controls-section">
-        <div class="control-group">
-          <label class="label">Language</label>
-          <select id="language-select">
-            <option value="en-us">English (US)</option>
-            <option value="en-gb">English (UK)</option>
-            <option value="es-419">Spanish</option>
-            <option value="pt-br">Portuguese (BR)</option>
-            <option value="it">Italian</option>
-            <option value="hi">Hindi</option>
-            <option value="ja">Japanese</option>
-            <option value="cmn">Chinese</option>
-          </select>
-        </div>
-        <div class="control-group">
-          <label class="label">Voice</label>
-          <select id="voice-select">
-            <option value="af_heart">Heart (Female)</option>
-          </select>
-        </div>
+      <!-- Voice -->
+      <div class="control-group">
+        <label class="label">Voice</label>
+        <select id="voice-select"></select>
       </div>
 
       <!-- Volume -->
@@ -110,10 +81,6 @@
           <input type="checkbox" id="read-mode-checkbox" />
           <span>Click-to-read mode (click any text on the page)</span>
         </label>
-        <label class="checkbox-label">
-          <input type="checkbox" id="highlight-checkbox" />
-          <span>Highlight current chunk</span>
-        </label>
       </div>
 
       <!-- Banner shown when app not running -->
@@ -124,14 +91,6 @@
         <button id="retry-btn" class="retry-btn">Retry Connection</button>
         <span class="download-hint">Works offline, 100% private</span>
       </div>
-
-      <!-- Footer -->
-      <div class="footer">
-        <a href="https://labs.light-cloud.com" target="_blank" class="footer-brand">
-          <img src="icons/lightcloud-logo.png" alt="Light Cloud Labs" class="footer-logo" />
-          <span>Light Cloud Labs</span>
-        </a>
-      </div>
     </div>
 
     <script src="constants.js"></script>
@@ -139,7 +98,6 @@
     <script src="src/streaming-player.js"></script>
     <script src="src/api.js"></script>
     <script src="src/settings.js"></script>
-    <script src="src/highlight.js"></script>
     <script src="src/playback.js"></script>
     <script src="sidepanel.js"></script>
   </body>
