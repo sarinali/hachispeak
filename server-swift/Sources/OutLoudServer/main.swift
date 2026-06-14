@@ -4,12 +4,11 @@ import Hummingbird
 
 let port = 51730
 
-print("[Server] Loading KokoroTTS model...")
-let model = try await KokoroTTSModel.fromPretrained { fraction, stage in
-    let pct = Int(fraction * 100)
-    print("[Model] \(pct)% — \(stage)")
-}
-print("[Server] Model loaded. Warming up...")
+print("[Server] Loading KokoroTTS model (first run downloads from HuggingFace)...")
+// No progressHandler: fromPretrained calls it from a background executor,
+// and Swift 6 traps when a @MainActor-captured closure crosses isolation domains.
+let model = try await KokoroTTSModel.fromPretrained()
+print("[Server] Model loaded. Warming up CoreML...")
 try model.warmUp()
 print("[Server] Warm-up complete.")
 
