@@ -51,13 +51,19 @@ func registerRoutes(on router: Router<BasicRequestContext>, tts: TTSActor) {
     router.post("/api/v1/audio/speech") { req, _ -> Response in
         let buf = try await req.body.collect(upTo: 1 << 20)
         let params = try JSONDecoder().decode(SpeechRequest.self, from: Data(buffer: buf))
-        let samples = try await tts.synthesize(
-            text: params.input,
-            voice: params.voice,
-            language: VoiceRegistry.language(for: params.voice),
-            speed: params.speed ?? 1.0
-        )
-        let wav = AudioUtils.makeWAV(samples: samples)
+        let voice = params.voice
+        let language = VoiceRegistry.language(for: voice)
+        let speed = params.speed ?? 1.0
+        let sentences = AudioUtils.splitSentences(params.input)
+        let displayChunks = sentences.isEmpty ? [params.input] : sentences
+        var allSamples: [Float] = []
+        for sentence in displayChunks {
+            for sub in AudioUtils.splitForSynthesis(sentence) {
+                let samples = try await tts.synthesize(text: sub, voice: voice, language: language, speed: speed)
+                allSamples.append(contentsOf: samples)
+            }
+        }
+        let wav = AudioUtils.makeWAV(samples: allSamples)
         var headers: HTTPFields = [.contentType: "audio/wav"]
         addCORS(to: &headers)
         return Response(
@@ -84,9 +90,12 @@ func registerRoutes(on router: Router<BasicRequestContext>, tts: TTSActor) {
 
         let body = ResponseBody { writer in
             for (index, sentence) in chunks.enumerated() {
-                let samples = try await tts.synthesize(
-                    text: sentence, voice: voice, language: language, speed: speed)
-                let wav = AudioUtils.makeWAV(samples: samples)
+                var combinedSamples: [Float] = []
+                for sub in AudioUtils.splitForSynthesis(sentence) {
+                    let samples = try await tts.synthesize(text: sub, voice: voice, language: language, speed: speed)
+                    combinedSamples.append(contentsOf: samples)
+                }
+                let wav = AudioUtils.makeWAV(samples: combinedSamples)
                 let chunkHeader = AudioUtils.makeChunkHeader(index: index, total: total, dataLen: wav.count)
                 var out = ByteBuffer()
                 out.writeBytes(chunkHeader)
