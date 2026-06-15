@@ -28,6 +28,7 @@ class StreamingAudioPlayer {
     this.onError = null;
     this.onChunkChange = null;
     this.audioChunks = [];
+    this.chunkTextRanges = []; // [{textStart, textEnd}] per chunk, index-aligned with audioChunks
     this.decodedBuffers = []; // decoded AudioBuffer per chunk, index-aligned with chunkTimings
     this.chunkSources = []; // scheduled source per chunk index (not spliced; used for speed reschedule)
     this.volume = 0.8;
@@ -103,7 +104,13 @@ class StreamingAudioPlayer {
     if (currentChunk !== this.lastReportedChunk && currentChunk >= 0) {
       this.lastReportedChunk = currentChunk;
       if (this.onChunkChange) {
-        this.onChunkChange(currentChunk, this.chunkTimings.length);
+        const t = this.chunkTimings[currentChunk];
+        this.onChunkChange(
+          currentChunk,
+          this.chunkTimings.length,
+          t?.textStart ?? 0,
+          t?.textEnd ?? 0
+        );
       }
     }
 
@@ -132,7 +139,7 @@ class StreamingAudioPlayer {
     return false;
   }
 
-  async playCached(chunks) {
+  async playCached(chunks, textRanges = []) {
     this.cleanup(true);
     await this.initAudioContext();
     this.audioChunks = chunks;
@@ -142,9 +149,9 @@ class StreamingAudioPlayer {
     let scheduledEndTime = this.audioContext.currentTime + BUFFER_TIME;
     this.playbackStartTime = scheduledEndTime;
 
-    for (const chunk of chunks) {
+    for (let i = 0; i < chunks.length; i++) {
       try {
-        const audioBuffer = await this.audioContext.decodeAudioData(chunk.slice(0));
+        const audioBuffer = await this.audioContext.decodeAudioData(chunks[i].slice(0));
         const source = this.createSource(audioBuffer);
         source.start(scheduledEndTime);
 
@@ -152,6 +159,8 @@ class StreamingAudioPlayer {
         this.chunkTimings.push({
           startTime: scheduledEndTime,
           endTime: scheduledEndTime + dur,
+          textStart: textRanges[i]?.textStart ?? 0,
+          textEnd: textRanges[i]?.textEnd ?? 0,
         });
 
         scheduledEndTime += dur;
@@ -180,6 +189,10 @@ class StreamingAudioPlayer {
 
   getChunks() {
     return this.audioChunks;
+  }
+
+  getChunkTextRanges() {
+    return this.chunkTextRanges;
   }
 
   async playStreaming(url, requestBody) {
@@ -211,26 +224,30 @@ class StreamingAudioPlayer {
       let buffer = new Uint8Array(0);
       let firstChunkScheduled = false;
 
+      const HEADER_SIZE = 20;
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
         buffer = concatArrays(buffer, value);
 
-        while (buffer.length >= 12) {
+        while (buffer.length >= HEADER_SIZE) {
           const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
           const chunkIndex = view.getUint32(0, true);
           const totalChunks = view.getUint32(4, true);
           const wavLength = view.getUint32(8, true);
+          const textStart = view.getUint32(12, true);
+          const textEnd = view.getUint32(16, true);
 
-          if (buffer.length < 12 + wavLength) break;
+          if (buffer.length < HEADER_SIZE + wavLength) break;
 
-          const wavData = buffer.slice(12, 12 + wavLength);
-          buffer = buffer.slice(12 + wavLength);
+          const wavData = buffer.slice(HEADER_SIZE, HEADER_SIZE + wavLength);
+          buffer = buffer.slice(HEADER_SIZE + wavLength);
 
           this.totalChunks = totalChunks;
           this.chunksReceived = chunkIndex + 1;
           this.audioChunks.push(wavData.buffer.slice(0));
+          this.chunkTextRanges.push({ textStart, textEnd });
 
           try {
             const audioBuffer = await this.audioContext.decodeAudioData(wavData.buffer.slice(0));
@@ -253,6 +270,8 @@ class StreamingAudioPlayer {
             this.chunkTimings.push({
               startTime: this.scheduledEndTime,
               endTime: this.scheduledEndTime + dur,
+              textStart,
+              textEnd,
             });
 
             source.start(this.scheduledEndTime);
@@ -367,6 +386,7 @@ class StreamingAudioPlayer {
     }
 
     this.audioChunks = [];
+    this.chunkTextRanges = [];
     this.decodedBuffers = [];
     this.chunkSources = [];
     this.playbackStartTime = 0;
