@@ -4,6 +4,12 @@ import NIOCore
 enum AudioUtils {
     static let sampleRate: Int = 24000
 
+    struct TextChunk {
+        let text: String
+        let utf16Start: Int
+        let utf16End: Int
+    }
+
     /// Encode Float32 PCM samples as a minimal WAV file.
     static func makeWAV(samples: [Float]) -> Data {
         let numSamples = samples.count
@@ -37,32 +43,52 @@ enum AudioUtils {
         return data
     }
 
-    /// 12-byte chunk header: [chunkIndex LE32][totalChunks LE32][dataLen LE32]
-    static func makeChunkHeader(index: Int, total: Int, dataLen: Int) -> Data {
-        var d = Data(count: 12)
+    /// 20-byte chunk header: [chunkIndex LE32][totalChunks LE32][dataLen LE32][textStart LE32][textEnd LE32]
+    /// textStart/textEnd are UTF-16 code unit offsets into the original input string.
+    static func makeChunkHeader(index: Int, total: Int, dataLen: Int, textStart: Int, textEnd: Int) -> Data {
+        var d = Data(count: 20)
         d.withUnsafeMutableBytes { ptr in
-            ptr.storeBytes(of: UInt32(index),   toByteOffset: 0, as: UInt32.self)
-            ptr.storeBytes(of: UInt32(total),   toByteOffset: 4, as: UInt32.self)
-            ptr.storeBytes(of: UInt32(dataLen), toByteOffset: 8, as: UInt32.self)
+            ptr.storeBytes(of: UInt32(index),     toByteOffset: 0,  as: UInt32.self)
+            ptr.storeBytes(of: UInt32(total),     toByteOffset: 4,  as: UInt32.self)
+            ptr.storeBytes(of: UInt32(dataLen),   toByteOffset: 8,  as: UInt32.self)
+            ptr.storeBytes(of: UInt32(textStart), toByteOffset: 12, as: UInt32.self)
+            ptr.storeBytes(of: UInt32(textEnd),   toByteOffset: 16, as: UInt32.self)
         }
         return d
     }
 
     /// Split text into sentences on sentence-ending punctuation + newlines.
-    static func splitSentences(_ text: String) -> [String] {
-        var sentences: [String] = []
-        var current = ""
+    /// Returns TextChunks carrying UTF-16 offsets into the original string for
+    /// client-side highlight sync.
+    static func splitSentences(_ text: String) -> [TextChunk] {
+        var chunks: [TextChunk] = []
+        var currentChars: [Character] = []
+        var chunkStart = 0
+        var utf16Offset = 0
+
         for char in text {
-            current.append(char)
+            let charWidth = String(char).utf16.count
+            currentChars.append(char)
+            utf16Offset += charWidth
+
             if ".!?\n".contains(char) {
-                let trimmed = current.trimmingCharacters(in: .whitespaces)
-                if !trimmed.isEmpty { sentences.append(trimmed) }
-                current = ""
+                let sentence = String(currentChars).trimmingCharacters(in: .whitespaces)
+                if !sentence.isEmpty {
+                    chunks.append(TextChunk(text: sentence, utf16Start: chunkStart, utf16End: utf16Offset))
+                }
+                currentChars = []
+                chunkStart = utf16Offset
             }
         }
-        let tail = current.trimmingCharacters(in: .whitespaces)
-        if !tail.isEmpty { sentences.append(tail) }
-        return sentences.filter { !$0.isEmpty }
+
+        if !currentChars.isEmpty {
+            let remaining = String(currentChars).trimmingCharacters(in: .whitespaces)
+            if !remaining.isEmpty {
+                chunks.append(TextChunk(text: remaining, utf16Start: chunkStart, utf16End: utf16Offset))
+            }
+        }
+
+        return chunks.filter { !$0.text.isEmpty }
     }
 
     /// Split a sentence into word-count sub-chunks that fit within the model's 5-second
