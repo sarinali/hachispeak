@@ -2,6 +2,7 @@ import Foundation
 import Hummingbird
 import NIOCore
 import NIOPosix
+import TextForSpeech
 
 private struct SpeechRequest: Decodable, Sendable {
     let input: String
@@ -25,6 +26,12 @@ private func jsonResponse(_ encodable: some Encodable) throws -> Response {
         headers: headers,
         body: ResponseBody(byteBuffer: ByteBuffer(bytes: body))
     )
+}
+
+private func textChunks(for input: String) -> [AudioUtils.TextChunk] {
+    let chunks = AudioUtils.splitSentences(input)
+    guard chunks.isEmpty else { return chunks }
+    return [AudioUtils.TextChunk(text: input, utf16Start: 0, utf16End: input.utf16.count)]
 }
 
 func registerRoutes(on router: Router<BasicRequestContext>, tts: TTSActor) {
@@ -54,11 +61,11 @@ func registerRoutes(on router: Router<BasicRequestContext>, tts: TTSActor) {
         let voice = params.voice
         let language = VoiceRegistry.language(for: voice)
         let speed = params.speed ?? 1.0
-        let sentences = AudioUtils.splitSentences(params.input)
-        let displayChunks = sentences.isEmpty ? [params.input] : sentences
+        let chunks = textChunks(for: params.input)
         var allSamples: [Float] = []
-        for sentence in displayChunks {
-            for sub in AudioUtils.splitForSynthesis(sentence) {
+        for chunk in chunks {
+            let normalized = (try? await TextForSpeech.Normalize.text(chunk.text, style: .balanced)) ?? chunk.text
+            for sub in AudioUtils.splitForSynthesis(normalized) {
                 let samples = try await tts.synthesize(text: sub, voice: voice, language: language, speed: speed)
                 allSamples.append(contentsOf: samples)
             }
@@ -74,12 +81,12 @@ func registerRoutes(on router: Router<BasicRequestContext>, tts: TTSActor) {
     }
 
     // POST /api/v1/audio/speech/stream — chunked binary stream
-    // Wire format per chunk: [4B LE chunkIndex][4B LE totalChunks][4B LE wavLen][wav bytes]
+    // Wire format per chunk: [4B LE chunkIndex][4B LE totalChunks][4B LE wavLen][4B LE textStart][4B LE textEnd][wav bytes]
+    // textStart/textEnd are UTF-16 code unit offsets into the original input string.
     router.post("/api/v1/audio/speech/stream") { req, _ -> Response in
         let buf = try await req.body.collect(upTo: 1 << 20)
         let params = try JSONDecoder().decode(SpeechRequest.self, from: Data(buffer: buf))
-        let sentences = AudioUtils.splitSentences(params.input)
-        let chunks = sentences.isEmpty ? [params.input] : sentences
+        let chunks = textChunks(for: params.input)
         let total = chunks.count
         let voice = params.voice
         let language = VoiceRegistry.language(for: voice)
@@ -89,14 +96,21 @@ func registerRoutes(on router: Router<BasicRequestContext>, tts: TTSActor) {
         addCORS(to: &headers)
 
         let body = ResponseBody { writer in
-            for (index, sentence) in chunks.enumerated() {
+            for (index, chunk) in chunks.enumerated() {
+                let normalized = (try? await TextForSpeech.Normalize.text(chunk.text, style: .balanced)) ?? chunk.text
                 var combinedSamples: [Float] = []
-                for sub in AudioUtils.splitForSynthesis(sentence) {
+                for sub in AudioUtils.splitForSynthesis(normalized) {
                     let samples = try await tts.synthesize(text: sub, voice: voice, language: language, speed: speed)
                     combinedSamples.append(contentsOf: samples)
                 }
                 let wav = AudioUtils.makeWAV(samples: combinedSamples)
-                let chunkHeader = AudioUtils.makeChunkHeader(index: index, total: total, dataLen: wav.count)
+                let chunkHeader = AudioUtils.makeChunkHeader(
+                    index: index,
+                    total: total,
+                    dataLen: wav.count,
+                    textStart: chunk.utf16Start,
+                    textEnd: chunk.utf16End
+                )
                 var out = ByteBuffer()
                 out.writeBytes(chunkHeader)
                 out.writeBytes(wav)
