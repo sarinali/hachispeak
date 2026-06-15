@@ -18,5 +18,11 @@ let package = Package(
                 .product(name: "TextForSpeech", package: "TextForSpeech"),
             ]
         ),
+        .testTarget(
+            name: "NormalizationTests",
+            dependencies: [
+                .product(name: "TextForSpeech", package: "TextForSpeech"),
+            ]
+        ),
     ]
 )
