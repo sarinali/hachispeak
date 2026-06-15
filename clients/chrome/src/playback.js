@@ -16,8 +16,9 @@ let isPlaying = false;
 let isPaused = false;
 let playGeneration = 0; // bumps on every new utterance / stop; guards stale callbacks
 let currentText = ""; // text of the current utterance (for resume-from-position)
+let currentTextStart = 0; // UTF-16 offset into currentText where the playing chunk starts
 let playStartedAt = 0; // performance.now() when the current play() kicked off (for latency logging)
-let cachedAudio = { text: "", voice: "", chunks: [] };
+let cachedAudio = { text: "", voice: "", chunks: [], textRanges: [] };
 
 function getPlayer() {
   if (!player) player = new StreamingAudioPlayer();
@@ -37,10 +38,9 @@ function createPlayerCallbacks(ui, gen) {
       ui.updateUI();
       ui.playBtn.disabled = false;
     },
-    onChunkChange: (idx, total) => {
+    onChunkChange: (idx, total, textStart, textEnd) => {
       if (gen !== playGeneration) return;
-      currentChunkIndex = idx;
-      totalChunks = total;
+      currentTextStart = textStart;
       ui.updateHighlight();
     },
     onEnd: () => {
@@ -168,7 +168,7 @@ async function playCached(ui, gen) {
   p.onEnd = cb.onEnd;
   p.onError = cb.onError;
 
-  await p.playCached(cachedAudio.chunks);
+  await p.playCached(cachedAudio.chunks, cachedAudio.textRanges);
   if (gen === playGeneration) ui.playBtn.disabled = !ui.getText();
 }
 
@@ -182,7 +182,12 @@ async function playStream(ui, gen) {
   p.onChunkChange = cb.onChunkChange;
   p.onEnd = () => {
     if (gen === playGeneration) {
-      cachedAudio = { text: currentText, voice: settings.voice, chunks: p.getChunks() };
+      cachedAudio = {
+        text: currentText,
+        voice: settings.voice,
+        chunks: p.getChunks(),
+        textRanges: p.getChunkTextRanges(),
+      };
     }
     cb.onEnd();
   };
@@ -232,6 +237,7 @@ async function playBlocking(ui, gen) {
 // reset UI. Bumping the generation guarantees nothing resumes.
 function stopPlayback(ui) {
   playGeneration++;
+  currentTextStart = 0;
   abortCurrent();
   ui.clearHighlight();
   ui.updateUI();
@@ -242,11 +248,7 @@ function stopPlayback(ui) {
 // sentences (from the current chunk) with the now-current voice.
 async function resumeWithVoice(ui) {
   if (!isPlaying && !isPaused) return false;
-  const chunks = getTextChunks(currentText);
-  let idx = currentChunkIndex;
-  if (idx < 0) idx = 0;
-  if (idx >= chunks.length) idx = chunks.length - 1;
-  const remaining = chunks.length ? currentText.slice(chunks[idx].start) : currentText;
+  const remaining = currentTextStart > 0 ? currentText.slice(currentTextStart) : currentText;
   clearCache();
   await play(ui, remaining);
   return true;
@@ -262,7 +264,7 @@ function setVolume(vol) {
 }
 
 function clearCache() {
-  cachedAudio = { text: "", voice: "", chunks: [] };
+  cachedAudio = { text: "", voice: "", chunks: [], textRanges: [] };
 }
 
 function hasCachedAudio() {
