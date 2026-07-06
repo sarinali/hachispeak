@@ -10,18 +10,24 @@ let package = Package(
         .package(url: "https://github.com/gaelic-ghost/TextForSpeech.git", from: "0.23.0"),
     ],
     targets: [
+        .target(
+            name: "TextNormalization",
+            dependencies: [
+                .product(name: "TextForSpeech", package: "TextForSpeech"),
+            ]
+        ),
         .executableTarget(
             name: "OutLoudServer",
             dependencies: [
                 .product(name: "KokoroTTS", package: "speech-swift"),
                 .product(name: "Hummingbird", package: "hummingbird"),
-                .product(name: "TextForSpeech", package: "TextForSpeech"),
+                .target(name: "TextNormalization"),
             ]
         ),
         .testTarget(
             name: "NormalizationTests",
             dependencies: [
-                .product(name: "TextForSpeech", package: "TextForSpeech"),
+                .target(name: "TextNormalization"),
             ]
         ),
     ]

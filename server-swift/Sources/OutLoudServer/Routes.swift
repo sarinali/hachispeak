@@ -2,7 +2,7 @@ import Foundation
 import Hummingbird
 import NIOCore
 import NIOPosix
-import TextForSpeech
+import TextNormalization
 
 private struct SpeechRequest: Decodable, Sendable {
     let input: String
@@ -35,26 +35,22 @@ private func textChunks(for input: String) -> [AudioUtils.TextChunk] {
 }
 
 func registerRoutes(on router: Router<BasicRequestContext>, tts: TTSActor) {
-    // OPTIONS preflight
     router.on("/**", method: .options) { _, _ -> Response in
         var headers = HTTPFields()
         addCORS(to: &headers)
         return Response(status: .noContent, headers: headers)
     }
 
-    // GET /api/v1/info
     router.get("/api/v1/info") { _, _ -> Response in
         let info: [String: String] = ["acceleration": "coreml", "platform": "darwin", "arch": "arm64"]
         return try jsonResponse(info)
     }
 
-    // GET /api/v1/audio/voices
     router.get("/api/v1/audio/voices") { _, _ -> Response in
         struct VoiceList: Encodable { let voices: [Voice] }
         return try jsonResponse(VoiceList(voices: VoiceRegistry.voices))
     }
 
-    // POST /api/v1/audio/speech — full WAV body
     router.post("/api/v1/audio/speech") { req, _ -> Response in
         let buf = try await req.body.collect(upTo: 1 << 20)
         let params = try JSONDecoder().decode(SpeechRequest.self, from: Data(buffer: buf))
@@ -64,7 +60,7 @@ func registerRoutes(on router: Router<BasicRequestContext>, tts: TTSActor) {
         let chunks = textChunks(for: params.input)
         var allSamples: [Float] = []
         for chunk in chunks {
-            let normalized = (try? await TextForSpeech.Normalize.text(chunk.text, style: .balanced)) ?? chunk.text
+            let normalized = await TextNormalizer.normalize(chunk.text)
             for sub in AudioUtils.splitForSynthesis(normalized) {
                 let samples = try await tts.synthesize(text: sub, voice: voice, language: language, speed: speed)
                 allSamples.append(contentsOf: samples)
@@ -80,9 +76,6 @@ func registerRoutes(on router: Router<BasicRequestContext>, tts: TTSActor) {
         )
     }
 
-    // POST /api/v1/audio/speech/stream — chunked binary stream
-    // Wire format per chunk: [4B LE chunkIndex][4B LE totalChunks][4B LE wavLen][4B LE textStart][4B LE textEnd][wav bytes]
-    // textStart/textEnd are UTF-16 code unit offsets into the original input string.
     router.post("/api/v1/audio/speech/stream") { req, _ -> Response in
         let buf = try await req.body.collect(upTo: 1 << 20)
         let params = try JSONDecoder().decode(SpeechRequest.self, from: Data(buffer: buf))
@@ -97,7 +90,7 @@ func registerRoutes(on router: Router<BasicRequestContext>, tts: TTSActor) {
 
         let body = ResponseBody { writer in
             for (index, chunk) in chunks.enumerated() {
-                let normalized = (try? await TextForSpeech.Normalize.text(chunk.text, style: .balanced)) ?? chunk.text
+                let normalized = await TextNormalizer.normalize(chunk.text)
                 var combinedSamples: [Float] = []
                 for sub in AudioUtils.splitForSynthesis(normalized) {
                     let samples = try await tts.synthesize(text: sub, voice: voice, language: language, speed: speed)
