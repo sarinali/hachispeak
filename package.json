@@ -1,12 +1,12 @@
 {
-  "name": "out-loud",
+  "name": "hachispeak",
   "version": "1.0.5",
   "description": "Free, open-source, 100% offline AI text-to-speech server powered by Kokoro-82M.",
   "license": "MIT",
-  "homepage": "https://github.com/light-cloud-com/out-loud#readme",
+  "homepage": "https://github.com/sarinali/hachispeak#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/light-cloud-com/out-loud.git"
+    "url": "https://github.com/sarinali/hachispeak.git"
   },
   "private": true,
   "type": "module",

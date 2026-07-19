@@ -1,8 +1,6 @@
 # hachispeak
 
-hachispeak! forked from https://github.com/light-cloud-com/out-loud, modified to have a central clients folder for diverse client support + coreml with koroko for native performance on macOS.
-
-named hachispeak after hachiware
+Local TTS with a Swift/CoreML server and Chrome client support. Named after hachiware.
 
 <img width="360" height="360" alt="image" src="https://github.com/user-attachments/assets/168479b2-d300-41af-8af2-8b0ccf5c51aa" />
 
