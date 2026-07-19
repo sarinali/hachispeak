@@ -2,6 +2,8 @@
 
 Local TTS with a Swift/CoreML server and Chrome client support. Named after hachiware.
 
+Originally based on [Out Loud](https://github.com/light-cloud-com/out-loud) by [Light Cloud Labs](https://github.com/light-cloud-com).
+
 <img width="360" height="360" alt="image" src="https://github.com/user-attachments/assets/168479b2-d300-41af-8af2-8b0ccf5c51aa" />
 
 Free, open-source, 100% offline AI text-to-speech. Runs a local HTTP server on port `51730` powered by [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M). Nothing leaves your machine.
