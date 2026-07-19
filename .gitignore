@@ -1,0 +1,34 @@
+# Temp files and dirs
+temp/
+tmp/
+
+# Nodejs
+node_modules
+
+# Build artifacts (all final outputs land in releases/)
+releases/
+electron-ui/dist/
+tray-app/dist/
+chrome-extension/lib/*.wasm
+
+# Downloaded on demand by scripts/download-vc-redist.mjs before Windows builds.
+# Bundled into the Windows installer so onnxruntime-node's native binary can
+# load on fresh Windows installs without the user installing VC++ Redist.
+build-resources/vc_redist.x64.exe
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
