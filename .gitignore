@@ -11,6 +11,7 @@ electron-ui/dist/
 tray-app/dist/
 chrome-extension/lib/*.wasm
 clients/chrome/dist/
+clients/macos/.build/
 
 # Downloaded on demand by scripts/download-vc-redist.mjs before Windows builds.
 # Bundled into the Windows installer so onnxruntime-node's native binary can
